@@ -53,6 +53,12 @@ installSdkMock(() => ({
       const explicitlyHookedIds = new Set<string>()
       for (const msg of script ? script.messages : mockMessages) {
         yieldedCount++
+        // Runs a fixture step at this point in the SDK stream, e.g. a client
+        // disconnect between capture and termination. Never delivered.
+        if (msg?.type === "test_callback") {
+          await msg.run()
+          continue
+        }
         if (msg?.type === "test_pre_tool_hook") {
           explicitlyHookedIds.add(msg.tool_use_id)
           if (preHook) {
@@ -2462,6 +2468,50 @@ describe("Integration: passthrough early stop", () => {
     expect(body).toContain('"stop_reason":"tool_use"')
     expect(types[types.length - 1]).toBe("message_stop")
     expect(types.filter((t: string) => t === "message_stop")).toHaveLength(1)
+  })
+
+  // A client that went away must not be handed a call it can no longer
+  // answer, and the proxy must not open an envelope on its behalf.
+  it("stream: an unopened capped turn is not recovered after the client disconnected", async () => {
+    const client = new AbortController()
+    const sessionKey = `es-capped-unstreamed-abort-${TEST_RUN_ID}`
+    usedSessionKeys.add(sessionKey)
+    mockMessages = [
+      assistantMessage([
+        { type: "tool_use", id: "unstreamed-aborted-tool", name: "read", input: { file_path: "z" } },
+      ]),
+      userDenyMessage("unstreamed-aborted-tool"),
+      { type: "test_callback", run: async () => { client.abort(new Error("client went away")); await Bun.sleep(5) } },
+      { type: "result", subtype: "error_max_turns", is_error: true, session_id: "test-session" },
+    ]
+    mockTerminalError = new Error("Claude Code returned an error result: Reached maximum number of turns (1)")
+    const startedAt = Date.now()
+
+    const res = await app.fetch(new Request("http://localhost/v1/messages", {
+      method: "POST",
+      signal: client.signal,
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": "dummy",
+        "x-opencode-session": sessionKey,
+        "user-agent": "opencode/1.0.0",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 400,
+        stream: true,
+        tools: [READ_TOOL],
+        messages: [{ role: "user", content: "read z then vanish" }],
+      }),
+    }))
+    let body = ""
+    try { body = await res.text() } catch { /* a cancelled body may reject; nothing may have been delivered */ }
+    expect(body).not.toContain("unstreamed-aborted-tool")
+    expect(body).not.toContain('"stop_reason":"tool_use"')
+    await Bun.sleep(20)
+    const recovered = diagnosticLog.getRecent({ limit: 500, since: startedAt })
+      .filter((entry: { message: string }) => entry.message.includes("_unopened"))
+    expect(recovered).toHaveLength(0)
   })
 
   it("stream: the recovered unopened turn forwards its text before the captured call", async () => {

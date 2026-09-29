@@ -5023,6 +5023,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 messageStartEmitted = true
                 eventsForwarded += 1
               }
+              // Content blocks without an open message are orphans on the wire.
+              if (!messageStartEmitted) return "end_turn"
               for (const turn of turns) {
                 for (const block of turn.content ?? []) {
                   const frames = unstreamedAssistantBlockFrames(block, nextClientBlockIndex, allowUnstreamedThinking)

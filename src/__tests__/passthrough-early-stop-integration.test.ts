@@ -2419,6 +2419,79 @@ describe("Integration: passthrough early stop", () => {
     expect(body).toContain("event: error")
   })
 
+  // Claude Code can deliver a turn without streaming it (for example when it
+  // retries a refused stream non-streaming, #1098). The PreToolUse hook still
+  // captures the client call, but no stream_event ever opened the client
+  // envelope. When that turn then hits the one-turn cap, recovery must open
+  // the envelope itself and hand over the captured call; before this, the gate
+  // required an open envelope and the raw "Reached maximum number of turns (1)"
+  // reached the client (observed live: envelope=unopened tools=1/0).
+  it("stream: a capped turn whose captured call never streamed opens the envelope and hands it over", async () => {
+    const toolTurn = assistantMessage([
+      { type: "tool_use", id: "unstreamed-capped-tool", name: "read", input: { file_path: "x" } },
+    ])
+    mockMessages = [
+      toolTurn,
+      userDenyMessage("unstreamed-capped-tool"),
+      { type: "result", subtype: "error_max_turns", is_error: true, session_id: "test-session" },
+    ]
+    mockTerminalError = new Error("Claude Code returned an error result: Reached maximum number of turns (1)")
+
+    const res = await post(app, {
+      model: "claude-sonnet-4-5",
+      max_tokens: 400,
+      stream: true,
+      tools: [READ_TOOL],
+      messages: [{ role: "user", content: "read x unstreamed" }],
+    }, "es-capped-unstreamed-captured")
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).not.toContain("event: error")
+    expect(body).not.toContain("maximum number of turns")
+    const events = parseSSE(body)
+    const types = events.map((e: any) => e.event)
+    expect(types.filter((t: string) => t === "message_start")).toHaveLength(1)
+    expect(types[0]).toBe("message_start")
+    const toolStarts = events.filter((e: any) =>
+      e.event === "content_block_start" && e.data?.content_block?.type === "tool_use")
+    expect(toolStarts).toHaveLength(1)
+    const handedOver = toolStarts[0]!.data.content_block as { id?: string; name?: string }
+    expect(handedOver.id).toBe("unstreamed-capped-tool")
+    expect(handedOver.name).toBe("read")
+    expect(body).toContain('"partial_json":"{\\"file_path\\":\\"x\\"}"')
+    expect(body).toContain('"stop_reason":"tool_use"')
+    expect(types[types.length - 1]).toBe("message_stop")
+    expect(types.filter((t: string) => t === "message_stop")).toHaveLength(1)
+  })
+
+  it("stream: the recovered unopened turn forwards its text before the captured call", async () => {
+    mockMessages = [
+      assistantMessage([
+        { type: "text", text: "Reading the file." },
+        { type: "tool_use", id: "unstreamed-capped-text-tool", name: "read", input: { file_path: "y" } },
+      ]),
+      userDenyMessage("unstreamed-capped-text-tool"),
+      { type: "result", subtype: "error_max_turns", is_error: true, session_id: "test-session" },
+    ]
+    mockTerminalError = new Error("Claude Code returned an error result: Reached maximum number of turns (1)")
+
+    const res = await post(app, {
+      model: "claude-sonnet-4-5",
+      max_tokens: 400,
+      stream: true,
+      tools: [READ_TOOL],
+      messages: [{ role: "user", content: "read y unstreamed" }],
+    }, "es-capped-unstreamed-text")
+    const body = await res.text()
+    expect(body).not.toContain("event: error")
+    const events = parseSSE(body)
+    const starts = events.filter((e: any) => e.event === "content_block_start")
+      .map((e: any) => ({ index: e.data.index, type: e.data.content_block.type }))
+    expect(starts).toEqual([{ index: 0, type: "text" }, { index: 1, type: "tool_use" }])
+    expect(body).toContain("Reading the file.")
+    expect(body).toContain('"stop_reason":"tool_use"')
+  })
+
   // An empty text block is still an empty turn: content_block_start advances
   // the client block index, but without a text delta the client received no
   // actionable content. Keep the capped turn on the error path.

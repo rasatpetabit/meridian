@@ -1,6 +1,30 @@
 # Upstream review handoff
 
-## Active authorized backlog (2026-10-01)
+## Nowaker priority (2026-10-01)
+
+Owner specifically prioritized the six remaining Nowaker PRs: #792, #1187,
+#1190, #1176, #1175 and #1171. Active persistent goal covers incorporation,
+corrections and actual-client verification; scoped requests authorize the
+selected feature contracts, with tracking issues where required. No release
+or external comments/messages are authorized. Preserve the dirty checkout.
+
+**#792 in progress.** Four authored commits preserved on an isolated main-based
+branch. Tracking issue #1215. Prototype-ID links, cross-process profile writer
+lost updates, Keychain failure-log credential exposure, and navigation-lost
+pending creation form corrected in separate maintainer commits. Maintained
+probes show before failures and after success. [Evidence](evidence/792-browser-account-login.md).
+Linux focused tests and actual macOS/Linux native-store round trips pass. Real
+OAuth completion and actual headless use of that newly created account remain
+open gates: first sign-in exposed the navigation issue; fresh sign-in requested
+after the real reload regression passed. Never infer completion from waiting.
+
+**#1190 in progress.** Source `be7ad199` cherry-picked as `f89bfe0c`, author and
+authored date preserved. Issue #1216 tracks public scope. Maintainer correction
+labels the result `scope: client-http`; zero does not claim safe restart of
+background Responses jobs, pending continuations or post-probe admissions.
+Actual headless activity gate, final tests/CI and incorporation remain pending.
+
+## Earlier authorized backlog (2026-10-01)
 
 Owner requested a persistent goal covering PRs/issues, authored cherry-picks,
 maintainer corrections and headless actual-client evidence. Initial paginated

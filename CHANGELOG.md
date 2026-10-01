@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.80.0](https://github.com/rynfar/meridian/compare/meridian-v1.79.0...meridian-v1.80.0) (2026-10-01)
+
+
+### Features
+
+* certify local builds and show runtime provenance ([#1225](https://github.com/rynfar/meridian/issues/1225)) ([bd00c16](https://github.com/rynfar/meridian/commit/bd00c164d198a368956c79658897a6360a0cd5ea))
+* **profiles:** find and link accounts without changing routing ([#1207](https://github.com/rynfar/meridian/issues/1207)) ([4c5e602](https://github.com/rynfar/meridian/commit/4c5e602e2640348a0fa32668e30e2e621eea700c))
+* report opt-in crashes with scrubbed errors and preserved runtime policy ([#1206](https://github.com/rynfar/meridian/issues/1206)) ([cc74cd2](https://github.com/rynfar/meridian/commit/cc74cd2dd65ec3a246512179fc7958a79a1bccd6))
+
+
+### Bug Fixes
+
+* **health:** refresh stale auth status without blocking probes ([#1203](https://github.com/rynfar/meridian/issues/1203)) ([98c48c0](https://github.com/rynfar/meridian/commit/98c48c03ff65f0b8ce428c8b60718655c49f85dd))
+* keep SDK pings from extending the upstream idle deadline ([#1209](https://github.com/rynfar/meridian/issues/1209)) ([0f2a4a5](https://github.com/rynfar/meridian/commit/0f2a4a541b3b7b14022317ecd9ffe14c149b8f1d))
+* recover rejected client tools at the deferred turn budget ([#1208](https://github.com/rynfar/meridian/issues/1208)) ([b4d2342](https://github.com/rynfar/meridian/commit/b4d23428ea6b7dd9d7f4878e3fd59ad92bcb4e9f))
+* **session:** reuse unchanged store entries with safe immutable reads ([#1204](https://github.com/rynfar/meridian/issues/1204)) ([2404eae](https://github.com/rynfar/meridian/commit/2404eae1eafbc530e472a0bf28b775f2b7956689))
+* **settings:** contain pricing table overflow ([#1196](https://github.com/rynfar/meridian/issues/1196)) ([c04a861](https://github.com/rynfar/meridian/commit/c04a861ba8a4fb71d105065afa9b73019d9985f4))
+* **ui:** keep account pages within mobile viewports and serve packaged icons ([#1205](https://github.com/rynfar/meridian/issues/1205)) ([dedb555](https://github.com/rynfar/meridian/commit/dedb55564aedccb9e207167f4ae148aeac112e0d))
+
 ## [1.79.0](https://github.com/rynfar/meridian/compare/meridian-v1.78.0...meridian-v1.79.0) (2026-09-29)
 
 

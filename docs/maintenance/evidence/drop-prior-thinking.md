@@ -36,3 +36,48 @@ Verification: targeted 13 pass, 0 fail; original mocked regression red 2 fail / 
 Frontier reviews: gpt-6.1-sol scoped approach approved; final Opus 5.5 scoped code review no material blocking findings. Remaining lows: sibling-ENOENT fault injection and standalone thinking-only-message API edge not live covered; abrupt death may orphan a private temp file. Fail-closed pruning retained deliberately rather than silently resending history.
 
 No production service changes. Scratch listeners closed, isolated auth/config/session state removed. No push, PR, merge or install.
+
+## 2026-10-01 follow-up: transcript-derived anchor and fail-safe pruning
+
+Fixes for two critic blockers. B1: the retained thinking used to depend on a caller-supplied checkpoint, so a hidden digest row written last could take the open tool loop's thinking. B2: any prune error failed an already-delivered turn and poisoned every later resume.
+
+Rule now applied (source: platform.claude.com `build-with-claude/thinking`, "Thinking with tool use" / "Preserving thinking blocks", and `preserved-thinking`, prefix check):
+- A tool-use loop is one assistant turn, and its thinking must be returned with the tool results. While any assistant group after the last plain user prompt has a `tool_use` with no real `tool_result`, every group of that turn keeps its thinking.
+- Passthrough hook blocks are not results. Hidden digest groups (answers to a hook-block row) and sidechain rows are never anchors.
+- Prior turns lose all thinking. That is a removal from the start of history, which the prefix check allows, so the retained blocks stay an unbroken run.
+
+The checkpoint is still passed by every call site, now including the four fresh-replay and model-fallback attempts. It only adds groups to keep.
+
+Failures are typed (`malformed_row`, `unparseable_line`, `checkpoint_absent`, `transcript_not_found`, `transcript_ambiguous`, `not_regular_file`, or an errno code). They are logged as `session.prior_thinking_prune_failed {mode, reason}` and leave the transcript byte-identical. Only `SessionLifecycleError` propagates. A truncated trailing line is kept byte-identical while the rest is pruned. A successful prune logs `session.prior_thinking_pruned {mode, messages, blocks, bytesBefore, bytesAfter}`. The transcript is found through the locator's `projectDir`; scanning every project only happens for legacy locators.
+
+Live E2E (same harness, Linux, Node v22.22.1, SDK 0.2.141, CLI 2.1.284, `claude-opus-5-5`, Pi-shaped streaming HTTP, adaptive thinking, effort high). Both arms send identical bodies. First-request prompt totals: off 2,650 (cache write 2,648), on 2,819 (cache read 2,297 + write 520). The 169-token difference repeats the earlier run's and is not explained by the flag, which cannot act before a resume. Compare growth, not absolute totals.
+
+| Flag | Req | Input | Cache read | Cache write | Output | Prompt | Growth | Thinking deltas | Tool calls | Upstream thinking idx (open-turn start) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| off | 1 | 2 | 0 | 2648 | 2749 | 2650 | — | 14 | 0 | [] (0) |
+| off | 2 | 4 | 2648 | 2948 | 1570 | 5600 | 2950 | 7 | 0 | [0] (1) |
+| off | 3 | 4 | 5596 | 1663 | 129 | 7263 | 1663 | 2 | 1 | [0,1] (2) |
+| off | 4 | 2 | 7259 | 173 | 123 | 7434 | 171 | 1 | 1 | [0,1,2] (2) |
+| off | 5 | 2 | 7432 | 165 | 99 | 7599 | 165 | 0 | 1 | [0,1,2,3] (2) |
+| off | 6 | 2 | 7597 | 141 | 127 | 7740 | 141 | 1 | 0 | [0,1,2,3] (2) |
+| off | 7 | 4 | 7738 | 156 | 1222 | 7898 | 158 | 5 | 0 | [0,1,2,3,5] (6) |
+| off | 8 | 4 | 7894 | 1247 | 1953 | 9145 | 1247 | 10 | 0 | [0,1,2,3,5,6] (7) |
+| on | 1 | 2 | 2297 | 520 | 2480 | 2819 | — | 10 | 0 | [] (0) |
+| on | 2 | 4 | 2297 | 1667 | 1847 | 3968 | 1149 | 8 | 0 | [] (1) |
+| on | 3 | 4 | 3964 | 1057 | 134 | 5025 | 1057 | 2 | 1 | [] (2) |
+| on | 4 | 2 | 5021 | 178 | 150 | 5201 | 176 | 1 | 1 | [2] (2) |
+| on | 5 | 2 | 5199 | 192 | 105 | 5393 | 192 | 0 | 1 | [2,3] (2) |
+| on | 6 | 2 | 5391 | 147 | 119 | 5540 | 147 | 0 | 0 | [2,3] (2) |
+| on | 7 | 4 | 5021 | 562 | 2362 | 5587 | 47 | 12 | 0 | [] (6) |
+| on | 8 | 4 | 5583 | 1070 | 1274 | 6657 | 1070 | 5 | 0 | [] (7) |
+
+All 16 requests made exactly one upstream generation with HTTP 200 and no client error. Requests 3–6 are a three-step client tool loop with tool_result continuations. In the on arm, the open turn's thinking (assistant indices 2 and 3) was returned with every continuation and accepted; no prior-turn thinking ever reached the API. Growth from request 2 to request 8: off 6,495, on 3,838. Final prompt: off 9,145, on 6,657.
+
+Budget thinking: a client `thinking: {type: "enabled", budget_tokens: 2048}` request on this path reached the API as `adaptive` (HTTP 200, thinking streamed). Opus 5.5 accepts only adaptive (`thinking-troubleshooting`), so an `enabled` arm cannot be exercised on this model. It is not covered.
+
+Verification: the new HTTP regression file (`proxy-prior-thinking-loop.test.ts`, 18 cases: digest-last on both wired paths, each of the four fresh call sites, and six fault sources × stream/non-stream) fails 18/18 against b755857's sources and passes 18/18 after the fix. Pure tests: 23 pass. `npm test`: 4,764 pass, 1 skip, 2 fail:
+- the Antigravity Node-TypeScript test, which also fails on origin/main because this distro Node has no TypeScript;
+- one `error-reporting` real-process crash race, which passes 16/16 three times in isolation.
+
+Typecheck and build are green. Test isolation repairs: `telemetry-settings-routes` used a raw logger `mock.module` that silenced every installed logger, and three `models` mocks stubbed `hasExtendedContext` to `false`, which broke `replay-budget` once the file order changed.
+Not verified live: the telemetry events (the harness runs silent), prune-failure paths against a real SDK crash, and the four fresh-fallback call sites (mocked only).

@@ -31,7 +31,14 @@ const relay = createServer(async (request, response) => {
     if (Array.isArray(body?.messages)) {
       const assistants = body.messages.filter(message => message.role === 'assistant')
       const thinking = assistants.map(message => message.content.filter(block => ['thinking', 'redacted_thinking'].includes(block.type)).length)
-      row = { setting, assistantMessages: assistants.length, thinkingBlocks: thinking.reduce((a, b) => a + b, 0), thinkingMessageIndices: thinking.flatMap((count, index) => count ? [index] : []), contextKeep: body.context_management?.edits?.find(edit => edit.type === 'clear_thinking_20251015')?.keep }
+      // Index (among assistants) of the first assistant after the last plain
+      // user prompt: the open turn. Thinking before it is prior-turn thinking.
+      let openTurnStart = 0
+      body.messages.forEach(message => {
+        const plain = message.role === 'user' && (typeof message.content === 'string' || !message.content.some(block => block.type === 'tool_result'))
+        if (plain) openTurnStart = body.messages.slice(0, body.messages.indexOf(message)).filter(m => m.role === 'assistant').length
+      })
+      row = { setting, thinkingType: body.thinking?.type, assistantMessages: assistants.length, openTurnStart, thinkingBlocks: thinking.reduce((a, b) => a + b, 0), thinkingMessageIndices: thinking.flatMap((count, index) => count ? [index] : []), contextKeep: body.context_management?.edits?.find(edit => edit.type === 'clear_thinking_20251015')?.keep }
       upstream.push(row)
     }
     const headers = { ...request.headers }
@@ -132,7 +139,7 @@ try {
       for (const request of requests) {
         assert.equal(request.status, 200)
         if (count > 1) assert(request.assistantMessages > 0, 'History replayed instead of resumed')
-        if (setting === 'on') assert(request.thinkingMessageIndices.every(index => index === request.assistantMessages - 1), 'Older assistant thinking reached the API')
+        if (setting === 'on') assert(request.thinkingMessageIndices.every(index => index >= request.openTurnStart), 'Prior-turn thinking reached the API')
       }
       messages.push({ role: 'assistant', content })
       return content
@@ -158,6 +165,21 @@ try {
     await send()
     assert(report.rows.filter(row => row.setting === setting).some(row => row.thinkingDeltas > 0 && row.signatureDeltas > 0), 'Thinking was not streamed')
   }
+  // Manual (budget) thinking probe: record whether this model/SDK path accepts it.
+  setting = 'budget-probe'
+  process.env.MERIDIAN_DROP_PRIOR_THINKING = '1'
+  const probeStart = upstream.length
+  const probe = await fetch(`http://127.0.0.1:${proxy.server.address().port}/v1/messages`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-meridian-agent': 'pi', 'x-session-affinity': 'thinking-budget-probe' },
+    body: JSON.stringify({ model: report.model, max_tokens: 4096, stream: true, thinking: { type: 'enabled', budget_tokens: 2048 },
+      messages: [{ role: 'user', content: 'In one sentence, why is 13 coins the maximum for three weighings with a reference coin?' }] }),
+    signal: AbortSignal.timeout(240000),
+  })
+  const probeText = await probe.text()
+  report.budgetProbe = { httpStatus: probe.status, clientError: /"type":"error"/.test(probeText),
+    thinkingDeltas: (probeText.match(/thinking_delta/g) || []).length,
+    upstream: upstream.slice(probeStart).map(row => ({ status: row.status, thinkingType: row.thinkingType, errorType: row.errorType })) }
+  console.log(JSON.stringify({ budgetProbe: report.budgetProbe }))
   report.passed = true
 } finally {
   if (reportPath) await writeFile(reportPath, JSON.stringify(report, null, 2), { mode: 0o600 })

@@ -49,14 +49,14 @@ export type {
 export { runTransformHook, runObserveHook, buildPipeline, createRequestContext } from "./transform"
 import { claudeLog } from "../logger"
 import { replayBudgetFor, trimReplayHistory } from "./replayBudget"
-import { PASSTHROUGH_DENY_REASON } from "./passthroughDenial"
+import { PASSTHROUGH_DENY_REASON, PASSTHROUGH_HANDLED_REASON, PASSTHROUGH_NOT_FORWARDED_REASON } from "./passthroughDenial"
 import { exec as execCallback } from "child_process"
 import { promisify } from "util"
 import { randomUUID } from "crypto"
 import { withClaudeLogContext } from "../logger"
 import { createPassthroughMcpServer, createPassthroughReplayToolNameRenderer, resolveClientToolName, normalizeToolInput, hasRepairableToolInput, computeToolSetKey, toolUseSignature, PASSTHROUGH_MCP_NAME, PASSTHROUGH_MCP_PREFIX, passthroughMcpPrefix, autoDeferDecision, getAutoDeferThreshold } from "./passthroughTools"
 import { describeLocalBootIdentity } from "./session/processIncarnation"
-import { prunePriorThinkingFile } from "./session/priorThinking"
+import { PriorThinkingPruneError, prunePriorThinkingFile } from "./session/priorThinking"
 import { detectServerTools, serverToolErrorMessage } from "./tools"
 import { clientAbortDisposition, coalesceCompleteToolResultContinuation, createEarlyStopTracker, isClientForwardedToolUse, noteAssistantMessage, noteUserContent, settledToolCallAssistantUuid, settlesCheckpointThenContinues, shouldEarlyStop, trackerCoversStreamedCalls } from "./passthroughEarlyStop"
 import { checkEmptyToolInputs, checkUndeliveredToolUses, type EnvelopeViolation } from "./envelopeIntegrity"
@@ -985,7 +985,21 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             if (attemptCompleted && envBool("DROP_PRIOR_THINKING") && params.options?.sessionId) {
               const target = activeLocators.find(locator => locator.sessionId === params.options?.sessionId)
               if (!target) throw new SessionLifecycleError("Thinking pruning target is not leased")
-              await prunePriorThinkingFile(target, thinkingCheckpoint?.())
+              // Pruning is an optimization over an already-delivered, billed turn.
+              // Any refusal leaves the transcript byte-identical and the turn intact;
+              // only lifecycle-fence violations propagate. Counts only, never content.
+              try {
+                const stats = await prunePriorThinkingFile(target, thinkingCheckpoint?.())
+                claudeLog("session.prior_thinking_pruned", { mode, ...stats })
+              } catch (error) {
+                if (error instanceof SessionLifecycleError) throw error
+                claudeLog("session.prior_thinking_prune_failed", {
+                  mode,
+                  reason: error instanceof PriorThinkingPruneError
+                    ? error.reason
+                    : error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : "unexpected",
+                })
+              }
             }
           } finally {
             await releaseJoinedTranscriptLease(activeTranscriptLease, sessionGcOptions)
@@ -3724,19 +3738,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 if (isExactDuplicate || isPostCheckpointCall) {
                   return {
                     decision: "block" as const,
-                    reason:
-                      "This tool call has already been handled by the client-facing turn — do not repeat it. " +
-                      "Do not call additional tools and do not generate further text — end your turn now.",
+                    reason: PASSTHROUGH_HANDLED_REASON,
                   }
                 }
                 if (isSameToolRepeat || exceedsForcedSingle) {
                   return {
                     decision: "block" as const,
-                    reason:
-                      "This tool call was NOT executed and was not forwarded. Your earlier tool call(s) " +
-                      "are being returned to the client now; their results arrive next turn. Re-issue this " +
-                      "call after that if it is still needed. Do not call additional tools and do not " +
-                      "generate further text — end your turn now.",
+                    reason: PASSTHROUGH_NOT_FORWARDED_REASON,
                   }
                 }
                 return {
@@ -4013,7 +4021,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
                       advisorModel,
-                    }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators())
+                    }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators(), () => nextPassthroughToolCallAssistantUuid)
                     return
                   }
 
@@ -4074,7 +4082,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
                       advisorModel,
-                    }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators())
+                    }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators(), () => nextPassthroughToolCallAssistantUuid)
                     return
                   }
 
@@ -5182,7 +5190,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                           ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                           : undefined,
                         advisorModel,
-                      }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "stream_fresh", managedSdkAttemptLocators())
+                      }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "stream_fresh", managedSdkAttemptLocators(), () => nextPassthroughToolCallAssistantUuid)
                       return
                     }
 
@@ -5239,7 +5247,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                           ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                           : undefined,
                         advisorModel,
-                      }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "stream_fresh", managedSdkAttemptLocators())
+                      }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "stream_fresh", managedSdkAttemptLocators(), () => nextPassthroughToolCallAssistantUuid)
                       return
                     }
 

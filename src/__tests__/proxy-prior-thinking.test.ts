@@ -15,10 +15,13 @@ let nextId = 0
 let failure: "startup" | "after-result" | undefined
 const thought = { type: "thinking", thinking: "current thought", signature: "current signature" }
 const visible = { type: "text", text: "answer" }
-function path(id: string) { return join(root, "projects", "fixture", `${id}.jsonl`) }
+let projectDirectory = ""
+// The CLI's own layout: projects/<cwd with non-alphanumerics as "-">/<id>.jsonl.
+function path(id: string) { return join(projectDirectory, `${id}.jsonl`) }
 installSdkMock(() => ({
   query: (params: { prompt: string | AsyncIterable<unknown>; options: Options }) => (async function* () {
     capturedOptions = params.options
+    projectDirectory = join(root, "projects", String(params.options.cwd).replace(/[^a-zA-Z0-9]/g, "-"))
     if (failure === "startup") throw new Error("fixture startup failure")
     capturedPrompt = typeof params.prompt === "string" ? params.prompt : []
     if (typeof params.prompt !== "string") {
@@ -31,7 +34,7 @@ installSdkMock(() => ({
     const content = [thought, visible]
     const assistant = assistantMessage(content)
     assistant.message.id = id
-    mkdirSync(join(root, "projects", "fixture"), { recursive: true })
+    mkdirSync(projectDirectory, { recursive: true })
     writeFileSync(path(params.options.sessionId!), prior + JSON.stringify({
       ...assistant, sessionId: params.options.sessionId, parentUuid: "parent",
     }) + "\n", { mode: 0o600 })

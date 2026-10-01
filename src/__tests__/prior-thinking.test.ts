@@ -127,13 +127,15 @@ describe("prior thinking pending-loop anchor (derived from the transcript)", () 
       turn("b2", "b1", "B", [toolUse("t2")]), turn("b3", "b2", "B", [thinking]), turn("b4", "b3", "B", [toolUse("t3")]),
       denial("d2", "b4", "t2"), denial("d3", "d2", "t3"), turn("g2", "d3", "digestB", [thinking, text])]
     const output = prunePriorThinkingTranscript(rows.join("\n"))
-    // The whole open assistant turn (A then B) keeps its thinking; digests do not.
-    expect(output.split("\n")[1]).toBe(rows[1])
+    // Only the still-pending API message (B) keeps its thinking. A was answered,
+    // so its thinking goes even though it belongs to the same open tool loop.
+    expect(contentOf(output, 1)).toEqual([])
+    expect(output.split("\n")[2]).toBe(rows[2])
     expect(contentOf(output, 4)).toEqual([text])
     for (const index of [6, 7, 8, 9]) expect(output.split("\n")[index]).toBe(rows[index])
     expect(contentOf(output, 12)).toEqual([text])
   })
-  it("drops earlier turns but keeps every group of the pending turn after the last plain prompt", () => {
+  it("drops answered steps of the open loop and keeps only the pending group", () => {
     const rows = [prompt("u0", null), turn("p1", "u0", "P", [thinking, toolUse("t0")]), result("r0", "p1", "t0"),
       turn("p2", "r0", "P2", [thinking, text]), prompt("u1", "p2"),
       turn("a1", "u1", "A", [thinking, toolUse("t1")]), result("r1", "a1", "t1"),
@@ -142,8 +144,44 @@ describe("prior thinking pending-loop anchor (derived from the transcript)", () 
     const output = prunePriorThinkingTranscript(rows.join("\n"))
     expect(contentOf(output, 1)).toEqual([toolUse("t0")])
     expect(contentOf(output, 3)).toEqual([text])
-    expect(output.split("\n")[5]).toBe(rows[5])
+    expect(contentOf(output, 5)).toEqual([toolUse("t1")])
     expect(output.split("\n")[8]).toBe(rows[8])
+  })
+  it("keeps only the newest step's thinking in a Pi-shaped loop with no plain prompt after the first", () => {
+    const rows = [prompt("u0", null),
+      turn("a1", "u0", "A", [thinking, toolUse("t1")]), result("r1", "a1", "t1"),
+      turn("b1", "r1", "B", [thinking]), turn("b2", "b1", "B", [toolUse("t2")]), result("r2", "b2", "t2"),
+      turn("c1", "r2", "C", [thinking, toolUse("t3")]), denial("d3", "c1", "t3"),
+      turn("g1", "d3", "digest", [thinking, text])]
+    const output = prunePriorThinkingTranscript(rows.join("\n"))
+    expect(contentOf(output, 1)).toEqual([toolUse("t1")])
+    expect(contentOf(output, 3)).toEqual([])
+    expect(output.split("\n")[4]).toBe(rows[4])
+    expect(output.split("\n")[6]).toBe(rows[6])
+    expect(contentOf(output, 8)).toEqual([text])
+    expect(pruneStats(rows.join("\n"))).toMatchObject({ messages: 3, blocks: 3 })
+  })
+  it("keeps a pending group's thinking even when a plain user row follows it", () => {
+    for (const extra of [{}, { isMeta: true }]) {
+      const rows = [prompt("u0", null), turn("a1", "u0", "A", [thinking, toolUse("t1")]), denial("d1", "a1", "t1"),
+        row("user", "n1", "d1", { role: "user", content: "continue" }, extra), turn("c1", "n1", "C", [thinking, text])]
+      const output = prunePriorThinkingTranscript(rows.join("\n"))
+      expect(output.split("\n")[1]).toBe(rows[1])
+      expect(contentOf(output, 4)).toEqual([text])
+    }
+  })
+  it("never empties a thinking-only API message: its rows stay byte-identical", () => {
+    const single = [prompt("u0", null), turn("s1", "u0", "silent", [thinking]), prompt("u1", "s1"),
+      turn("a1", "u1", "A", [thinking, text])]
+    const output = prunePriorThinkingTranscript(single.join("\n") + "\n")
+    expect(output.split("\n")[1]).toBe(single[1])
+    expect(contentOf(output, 3)).toEqual([text])
+    const split = [turn("s1", null, "silent", [thinking]), turn("s2", "s1", "silent", [{ type: "redacted_thinking", data: "opaque" }]),
+      prompt("u1", "s2"), turn("a1", "u1", "A", [thinking]), turn("a2", "a1", "A", [text])]
+    const second = prunePriorThinkingTranscript(split.join("\n"))
+    expect(second.split("\n").slice(0, 3)).toEqual(split.slice(0, 3))
+    expect(contentOf(second, 3)).toEqual([])
+    expect(pruneStats(split.join("\n"))).toMatchObject({ messages: 1, blocks: 1 })
   })
   it("drops all thinking once the loop is answered and the turn completes", () => {
     const rows = [prompt("u0", null), turn("a1", "u0", "A", [thinking, toolUse("t1")]), result("r1", "a1", "t1"),

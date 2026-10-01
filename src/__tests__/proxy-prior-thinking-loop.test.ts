@@ -19,12 +19,12 @@ import { blockStop, inputJsonDelta, messageDelta, messageStart, messageStop, par
 import { PASSTHROUGH_DENY_REASON } from "../proxy/passthroughDenial"
 import { setSessionStoreDir } from "../proxy/sessionStore"
 
-type Fault = "malformed_row" | "unparseable_line" | "truncated_tail" | "checkpoint_absent" | "transcript_not_found" | "not_regular_file"
+type Fault = "malformed_row" | "unparseable_line" | "truncated_tail" | "checkpoint_absent" | "transcript_not_found" | "not_regular_file" | "target_not_leased"
 type Refusal = "missing_message" | "extra_usage"
 
 let root: string
 let storeDir: string
-let calls: Array<{ options: Options; prompt: unknown }> = []
+let calls: Array<{ options: Options; prompt: unknown; sessionId?: string }> = []
 let logs: Array<{ event: string; data: Record<string, unknown> }> = []
 /** One entry per query(): what the SDK attempt does. */
 let script: Array<{ kind: "text" | "tool"; refuse?: Refusal; fault?: Fault }> = []
@@ -60,6 +60,7 @@ installSdkMock(() => ({
     if (step.refuse === "missing_message") throw new Error("No message found with message.uuid of: 6f1c0f4e-0a1e-4d61-9a2f-7b0c1d2e3f40")
     if (step.refuse === "extra_usage") throw new Error("Claude Code returned an error result: API Error: 400 You're out of extra usage.")
     const sessionId = options.sessionId!
+    calls.at(-1)!.sessionId = sessionId
     let prior = ""
     if (options.resume && existsSync(transcriptFile(options, options.resume))) {
       prior = readFileSync(transcriptFile(options, options.resume), "utf8")
@@ -134,6 +135,9 @@ installSdkMock(() => ({
       }
       yield event
     }
+    // target_not_leased: a locator-bookkeeping mismatch. The attempt's sessionId
+    // no longer names any leased locator when the prune gate runs.
+    if (step.fault === "target_not_leased") options.sessionId = crypto.randomUUID()
     yield { type: "result", subtype: "success", is_error: false, num_turns: 1, result: "", uuid: crypto.randomUUID(), session_id: sessionId,
       duration_ms: 1, duration_api_ms: 1, total_cost_usd: 0, usage: {}, modelUsage: {}, permission_denials: [] }
   })(),
@@ -270,6 +274,7 @@ describe("prune failures never fail a turn", () => {
     checkpoint_absent: "checkpoint_absent",
     transcript_not_found: "transcript_not_found",
     not_regular_file: "not_regular_file",
+    target_not_leased: "target_not_leased",
   }
   for (const stream of [false, true]) {
     const mode = stream ? "stream" : "non_stream"
@@ -280,7 +285,7 @@ describe("prune failures never fail a turn", () => {
         await send(app, stream, first, `fault-${mode}-${fault}`)
         const blocks = await send(app, stream, next, `fault-${mode}-${fault}`)
         expect(blocks.some(block => block.type === "tool_use")).toBe(true)
-        const target = calls[1]!.options.sessionId!
+        const target = calls[1]!.sessionId!
         const failed = logs.filter(log => log.event === "session.prior_thinking_prune_failed")
         if (reason) {
           expect(failed).toEqual([{ event: "session.prior_thinking_prune_failed", data: { mode, reason } }])

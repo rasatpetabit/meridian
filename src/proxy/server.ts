@@ -983,12 +983,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             // writers and GC until the atomic replacement is durable. UUIDs and
             // checkpoint rows survive; the next resume inherits the pruned prefix.
             if (attemptCompleted && envBool("DROP_PRIOR_THINKING") && params.options?.sessionId) {
-              const target = activeLocators.find(locator => locator.sessionId === params.options?.sessionId)
-              if (!target) throw new SessionLifecycleError("Thinking pruning target is not leased")
               // Pruning is an optimization over an already-delivered, billed turn.
-              // Any refusal leaves the transcript byte-identical and the turn intact;
-              // only lifecycle-fence violations propagate. Counts only, never content.
+              // Any refusal, including an unleased target (a locator bookkeeping
+              // mismatch, not a fence violation: the writer is joined and the
+              // lease held above), leaves the transcript byte-identical and the
+              // turn intact. Only fence violations propagate. Counts only, never content.
               try {
+                const target = activeLocators.find(locator => locator.sessionId === params.options?.sessionId)
+                if (!target) throw new PriorThinkingPruneError("target_not_leased")
                 const stats = await prunePriorThinkingFile(target, thinkingCheckpoint?.())
                 claudeLog("session.prior_thinking_pruned", { mode, ...stats })
               } catch (error) {

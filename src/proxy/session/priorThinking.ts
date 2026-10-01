@@ -14,6 +14,7 @@ export type PriorThinkingPruneFailure =
   | "transcript_not_found"
   | "transcript_ambiguous"
   | "not_regular_file"
+  | "target_not_leased"
 
 export class PriorThinkingPruneError extends Error {
   constructor(readonly reason: PriorThinkingPruneFailure) {
@@ -49,10 +50,6 @@ function toolResults(row: Row): ToolResultLike[] {
   if (row.type !== "user" || !mainChain(row) || !object(row.message) || !Array.isArray(row.message.content)) return []
   return row.message.content.filter((block): block is ToolResultLike => object(block) && block.type === "tool_result")
 }
-/** A user turn boundary: a new prompt, not a tool-result continuation or CLI meta reminder. */
-function plainUserTurn(row: Row): boolean {
-  return row.type === "user" && mainChain(row) && row.isMeta !== true && toolResults(row).length === 0
-}
 /** The passthrough hook's synthetic result row. Assistants answering it are hidden digests. */
 function hookBlockRow(row: Row): boolean {
   const results = toolResults(row)
@@ -86,18 +83,17 @@ function parse(transcript: string): Parsed {
   return { lines, rows }
 }
 
-/** API message groups whose thinking the API needs when the client returns tool
- * results. A tool-use loop is one assistant turn, and the API requires its
- * thinking back within that turn (manual mode also requires the turn to begin
- * with thinking). So while any group after the last plain user prompt holds a
- * tool_use with no real result, every group of that turn keeps its thinking.
- * Dropping all earlier turns' thinking is a removal from the start of history,
- * which keeps the retained blocks an unbroken run. A forwarding denial is not a
- * result, nor is any other passthrough hook block; both are rewound on resume.
- * Hidden digest groups (answers to a hook-block row) and sidechain rows are never
- * anchors, wherever they sit in the file.
+/** The API message group whose thinking the API needs when the client returns
+ * tool results: the newest main-chain group holding a tool_use with no real
+ * tool_result after it. Measured live on claude-opus-5-5 (adaptive): a
+ * tool_result continuation is accepted when only that newest message keeps its
+ * thinking and earlier steps of the same tool loop have none (see
+ * docs/maintenance/evidence/drop-prior-thinking.md). Position in the file and
+ * plain user rows do not matter: a forwarding denial or any other passthrough
+ * hook block is not a result, hidden digest groups (answers to a hook-block row)
+ * and sidechain rows are never anchors, wherever they sit.
  */
-function pendingToolGroups(rows: Array<Row | undefined>): Set<string> {
+function pendingToolGroup(rows: Array<Row | undefined>): string | undefined {
   const byUuid = new Map<string, Row>()
   for (const row of rows) if (row && typeof row.uuid === "string") byUuid.set(row.uuid, row)
   const answered = new Map<string, number>()
@@ -107,8 +103,6 @@ function pendingToolGroups(rows: Array<Row | undefined>): Set<string> {
       if (typeof result.tool_use_id === "string" && !isPassthroughHookBlock(result)) answered.set(result.tool_use_id, index)
     }
   })
-  let lastPlainUser = -1
-  rows.forEach((row, index) => { if (row && plainUserTurn(row)) lastPlainUser = index })
   const conversationalParent = (row: Row): Row | undefined => {
     const seen = new Set<string>()
     let parent = typeof row.parentUuid === "string" ? byUuid.get(row.parentUuid) : undefined
@@ -121,8 +115,7 @@ function pendingToolGroups(rows: Array<Row | undefined>): Set<string> {
   }
   const digests = new Set<string>()
   const firstRowSeen = new Set<string>()
-  const turn = new Set<string>()
-  let pending = false
+  let pending: string | undefined
   rows.forEach((row, index) => {
     const message = row && assistantMessage(row)
     if (!row || !message) return
@@ -132,20 +125,37 @@ function pendingToolGroups(rows: Array<Row | undefined>): Set<string> {
       const parent = conversationalParent(row)
       if (parent && hookBlockRow(parent)) digests.add(id)
     }
-    if (index < lastPlainUser || digests.has(id)) return
-    turn.add(id)
+    if (digests.has(id)) return
     for (const block of message.content as unknown[]) {
       if (!object(block) || block.type !== "tool_use" || typeof block.id !== "string") continue
       const resultAt = answered.get(block.id)
-      if (resultAt === undefined || resultAt < index) pending = true
+      if (resultAt === undefined || resultAt < index) pending = id
     }
   })
-  return pending ? turn : new Set()
+  return pending
+}
+
+/** Groups whose whole content is thinking. Emptying one would leave an API
+ * message with no content blocks, so those rows stay byte-identical. */
+function thinkingOnlyGroups(rows: Array<Row | undefined>): Set<string> {
+  const other = new Set<string>()
+  const thinking = new Set<string>()
+  for (const row of rows) {
+    const message = row && assistantMessage(row)
+    if (!message) continue
+    for (const block of message.content as unknown[]) {
+      if (object(block) && THINKING_TYPES.has(String(block.type))) thinking.add(message.id as string)
+      else other.add(message.id as string)
+    }
+  }
+  return new Set([...thinking].filter(id => !other.has(id)))
 }
 
 function prune(transcript: string, checkpointUuid?: string): { text: string; messages: number; blocks: number } {
   const { lines, rows } = parse(transcript)
-  const keep = pendingToolGroups(rows)
+  const keep = thinkingOnlyGroups(rows)
+  const pending = pendingToolGroup(rows)
+  if (pending) keep.add(pending)
   if (checkpointUuid) {
     const checkpoint = rows.find(row => row?.uuid === checkpointUuid)
     const message = checkpoint && assistantMessage(checkpoint)
@@ -168,8 +178,9 @@ function prune(transcript: string, checkpointUuid?: string): { text: string; mes
   return { text, messages: touched.size, blocks }
 }
 
-/** Drop thinking from every API message except the pending tool loop's, which the
- * API requires back with the client's tool_result. Completed turns need none.
+/** Drop thinking from every API message except the pending tool call's, which the
+ * API requires back with the client's tool_result. Earlier steps of the same
+ * tool loop and completed turns need none.
  * The CLI persists thinking/text/tool blocks as separate rows sharing message.id.
  * Empty rows must remain: their UUIDs can be parents or durable checkpoints.
  * No transcript content is logged, and unchanged rows retain their exact bytes.

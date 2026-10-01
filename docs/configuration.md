@@ -28,7 +28,7 @@ Environment variables, endpoints, authentication, SDK feature toggles, passthrou
 | `MERIDIAN_TELEMETRY_SIZE` | `CLAUDE_PROXY_TELEMETRY_SIZE` | `1000` | Telemetry ring buffer size, in rows. Pool routing writes one row **per account attempted**, so a request that failed over twice spends three. `/telemetry` reports what is actually held. |
 | `MERIDIAN_DIAGNOSTIC_LOG_SIZE` | `CLAUDE_PROXY_DIAGNOSTIC_LOG_SIZE` | `500` | Diagnostic log ring buffer size (the Logs tab and `GET /telemetry/logs`) |
 | `MERIDIAN_NO_FILE_CHANGES` | `CLAUDE_PROXY_NO_FILE_CHANGES` | unset | Disable "Files changed" summary in responses |
-| `MERIDIAN_DROP_PRIOR_THINKING` | `CLAUDE_PROXY_DROP_PRIOR_THINKING` | unset | Set to `1` to remove prior assistant thinking/signatures from Meridian-owned Claude SDK transcripts before their next resume. Thinking still streams to the client. Only the newest complete API message's thinking is retained while it contains a tool call; completed text turns retain none. This reduces recurring input/context usage but sacrifices prior reasoning continuity and rewrites the affected prompt-cache suffix once. Off by default; see [Prior thinking retention](#prior-thinking-retention). |
+| `MERIDIAN_DROP_PRIOR_THINKING` | `CLAUDE_PROXY_DROP_PRIOR_THINKING` | unset | Set to `1` to remove prior assistant thinking/signatures from Meridian-owned Claude SDK transcripts before their next resume. Thinking still streams to the client. Only the pending tool call's API message keeps its thinking (the newest one holding a tool call the client has not answered); earlier steps of the same tool loop and completed turns keep none. This reduces recurring input/context usage but sacrifices prior reasoning continuity and rewrites the affected prompt-cache suffix once. Off by default; see [Prior thinking retention](#prior-thinking-retention). |
 | `MERIDIAN_STRIP_THINKING` | `CLAUDE_PROXY_STRIP_THINKING` | unset | Set to `1` to strip raw `<thinking>` tags from user-authored prompt text. Off by default — `<thinking>` is a common chain-of-thought convention in hand-written prompts (#720); enable only if your harness is observed leaking it verbatim. |
 | `MERIDIAN_SONNET_MODEL` | `CLAUDE_PROXY_SONNET_MODEL` | `sonnet` | Sonnet context tier: `sonnet` (200k, default) or `sonnet[1m]` (1M, requires Extra Usage†). Not to be confused with `MERIDIAN_DEFAULT_SONNET_MODEL` below, which pins a concrete model id, not a context tier. |
 | `MERIDIAN_FABLE_MODEL` | `CLAUDE_PROXY_FABLE_MODEL` | `fable[1m]` | Fable context tier opt-out: set to `fable` to disable the 1M extended context window and stay on the 200k base variant (also governs Mythos, which rides the Fable tier). `fable[1m]` is a documented no-op. Not to be confused with `MERIDIAN_DEFAULT_FABLE_MODEL` below, which pins a concrete model id, not a context tier. |
@@ -95,8 +95,16 @@ transcript while holding its cross-process writer lease. The immutable resume
 source remains available for rollback. All UUID/parent UUID links, checkpoint
 rows and non-thinking content survive. Content fragments sharing an API
 message ID are retained or pruned together. A completed text turn needs no
-thinking on its next resume; an open tool loop retains only the newest complete
-API message, including every thinking fragment belonging to it. Older blocks
+thinking on its next resume. In an open tool loop only the API message holding
+the tool call the client has not yet answered keeps its thinking, including
+every fragment belonging to it; earlier steps of the same loop keep none, which
+`claude-opus-5-5` accepts on the tool_result continuation. Passthrough hook
+blocks are not answers, and hidden digest and sidechain messages are never
+retained for this. An API message whose whole content is thinking is left
+untouched so no message is emptied. A prune that cannot run is logged
+(`session.prior_thinking_prune_failed`, reason only) and leaves the transcript
+and the turn intact; a successful one logs counts
+(`session.prior_thinking_pruned`). Older blocks
 are never restored into the continuing branch. Undo forks the selected durable
 source, whose retained thinking is pruned under the same policy before another
 resume. Fresh structured replay includes assistant text and tool-call context,

@@ -139,7 +139,9 @@ try {
       for (const request of requests) {
         assert.equal(request.status, 200)
         if (count > 1) assert(request.assistantMessages > 0, 'History replayed instead of resumed')
-        if (setting === 'on') assert(request.thinkingMessageIndices.every(index => index >= request.openTurnStart), 'Prior-turn thinking reached the API')
+        // Only the newest assistant API message may carry thinking: earlier steps
+        // of the same open tool loop must arrive without it, and be accepted.
+        if (setting === 'on') assert(request.thinkingMessageIndices.every(index => index === request.assistantMessages - 1), 'Thinking older than the newest assistant message reached the API')
       }
       messages.push({ role: 'assistant', content })
       return content

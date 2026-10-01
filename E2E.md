@@ -7078,7 +7078,8 @@ workdir, SDK transcripts and ephemeral ports; never changes a running service.
 Optional `E2E_REPORT_PATH` writes only numeric/field-name JSON evidence. The
 harness drives Pi-shaped streaming HTTP with actual `claude-opus-5-5`, both
 flag settings, multi-turn answers and three sequential client tool calls. An
-in-memory upstream relay checks which assistant messages carry thinking; it
+in-memory upstream relay checks that, with the flag on, only the newest
+assistant message carries thinking; it
 never persists or prints prompts, transcripts or credentials. Finally closes
 owned listeners/SDK processes and deletes scratch state.
 

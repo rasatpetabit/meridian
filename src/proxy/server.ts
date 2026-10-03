@@ -5102,6 +5102,58 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               ? managedForkTarget?.sessionId
               : undefined
             let nextClientBlockIndex = 0
+            const allowUnstreamedThinking =
+              (!pipelineCtx.hidesInternalTools || sdkFeatures.thinkingPassthrough) &&
+              (!passthrough || pipelineCtx.supportsThinking || sdkFeatures.thinkingPassthrough)
+            // No stream event ever reached the client, but the SDK did answer:
+            // open the message and forward its visible content. In passthrough
+            // only the first turn belongs to the client (later ones react to the
+            // denied tool call). Captured tool_use blocks are never emitted here;
+            // each caller hands them over itself. Returns the stop reason the
+            // terminal delta should carry when no tool call is forwarded.
+            const openUnstreamedEnvelope = (): string => {
+              const first = unstreamedAssistants[0]
+              const turns = passthrough ? unstreamedAssistants.slice(0, 1) : unstreamedAssistants
+              // No SDK message_delta was seen, so the terminal delta has to
+              // be built by the caller; a tool_use stop is re-derived from what
+              // was actually forwarded.
+              const lastStop = turns.length > 0 ? turns[turns.length - 1]!.stop_reason : undefined
+              if (safeEnqueue(encoder.encode(
+                `event: message_start\ndata: ${JSON.stringify({
+                  type: "message_start",
+                  message: {
+                    id: first?.id ?? `msg_${Date.now()}`, type: "message", role: "assistant",
+                    model: first?.model ?? model,
+                    content: [], stop_reason: null, stop_sequence: null, usage: first?.usage ?? lastUsage ?? {},
+                  },
+                })}\n\n`
+              ), "unstreamed_message_start")) {
+                messageStartEmitted = true
+                eventsForwarded += 1
+              }
+              // Content blocks without an open message are orphans on the wire.
+              if (!messageStartEmitted) return "end_turn"
+              for (const turn of turns) {
+                for (const block of turn.content ?? []) {
+                  const frames = unstreamedAssistantBlockFrames(block, nextClientBlockIndex, allowUnstreamedThinking)
+                  if (frames.length === 0) continue
+                  nextClientBlockIndex++
+                  for (const frame of frames) {
+                    if (!safeEnqueue(encoder.encode(
+                      `event: ${frame.event}\ndata: ${JSON.stringify(frame.data)}\n\n`
+                    ), `unstreamed_${frame.event}`)) continue
+                    eventsForwarded += 1
+                    if (frame.event === "content_block_start") contentBlocksForwarded += 1
+                    if (frame.textLength !== undefined) {
+                      textEventsForwarded += 1
+                      textCharsForwarded += frame.textLength
+                    }
+                  }
+                }
+              }
+              claudeLog("response.unstreamed_turn_forwarded", { model, turns: turns.length })
+              return lastStop && lastStop !== "tool_use" ? lastStop : "end_turn"
+            }
             try {
               // Same transparent retry wrapper as the non-streaming path.
               // Rate-limit retry strategy:
@@ -6490,59 +6542,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               }
 
               if (!streamClosed) {
-                // No stream event ever reached the client, but the SDK did answer:
-                // open the message here and forward its visible content. In
-                // passthrough only the first turn belongs to the client (later
-                // ones react to the denied tool call); its captured tool_use
-                // blocks follow through the ordinary path below.
+                // Captured tool_use blocks of an unstreamed turn follow through
+                // the ordinary path below.
                 let unstreamedStopReason: string | undefined
                 const unseenToolUses = capturedToolUses.filter(tu => !streamedToolUseIds.has(tu.id))
-                const allowUnstreamedThinking =
-                  (!pipelineCtx.hidesInternalTools || sdkFeatures.thinkingPassthrough) &&
-                  (!passthrough || pipelineCtx.supportsThinking || sdkFeatures.thinkingPassthrough)
                 const visibleTurns = passthrough ? unstreamedAssistants.slice(0, 1) : unstreamedAssistants
                 const hasUnstreamedContent = visibleTurns.some(turn =>
                   turn.content?.some(block => unstreamedAssistantBlockFrames(block, 0, allowUnstreamedThinking).length > 0))
                 if (!messageStartEmitted && unstreamedAssistants.length > 0 &&
                     (hasUnstreamedContent || (passthrough && unseenToolUses.length > 0))) {
-                  const first = unstreamedAssistants[0]!
-                  const turns = visibleTurns
-                  // No SDK message_delta was seen, so the terminal delta has to
-                  // be built here; a tool_use stop is re-derived below from what
-                  // was actually forwarded.
-                  const lastStop = turns[turns.length - 1]!.stop_reason
-                  unstreamedStopReason = lastStop && lastStop !== "tool_use" ? lastStop : "end_turn"
-                  if (safeEnqueue(encoder.encode(
-                    `event: message_start\ndata: ${JSON.stringify({
-                      type: "message_start",
-                      message: {
-                        id: first.id, type: "message", role: "assistant", model: first.model ?? model,
-                        content: [], stop_reason: null, stop_sequence: null, usage: first.usage ?? lastUsage ?? {},
-                      },
-                    })}\n\n`
-                  ), "unstreamed_message_start")) {
-                    messageStartEmitted = true
-                    eventsForwarded += 1
-                  }
-                  for (const turn of turns) {
-                    for (const block of turn.content ?? []) {
-                      const frames = unstreamedAssistantBlockFrames(block, nextClientBlockIndex, allowUnstreamedThinking)
-                      if (frames.length === 0) continue
-                      nextClientBlockIndex++
-                      for (const frame of frames) {
-                        if (!safeEnqueue(encoder.encode(
-                          `event: ${frame.event}\ndata: ${JSON.stringify(frame.data)}\n\n`
-                        ), `unstreamed_${frame.event}`)) continue
-                        eventsForwarded += 1
-                        if (frame.event === "content_block_start") contentBlocksForwarded += 1
-                        if (frame.textLength !== undefined) {
-                          textEventsForwarded += 1
-                          textCharsForwarded += frame.textLength
-                        }
-                      }
-                    }
-                  }
-                  claudeLog("response.unstreamed_turn_forwarded", { model, turns: turns.length })
+                  unstreamedStopReason = openUnstreamedEnvelope()
                 }
 
                 // In passthrough mode, emit captured tool_use blocks as stream events
@@ -6898,12 +6907,28 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               // Discarding them turns a recoverable stall into a turn the model
               // later reports having "forgotten", because the next resume shows
               // its promise to act with no matching call.
-              const canRecoverAsToolUse = canRecoverCapturedToolUses({
+              const capturedRecoverable = canRecoverCapturedToolUses({
                 reason: ownSingleStepAbort ? "aborted" : sdkTerm.reason,
                 passthrough,
                 capturedToolUses: capturedToolUses.length,
                 abortIsOurs: ownSingleStepAbort && sawDuplicateToolUse,
-              }) && messageStartEmitted
+              })
+              // A turn Claude Code delivered without streaming (#1098) can carry
+              // a captured call while no stream event ever opened the client
+              // envelope. Nothing reached the client, so no call can have run
+              // there: open the envelope here and hand the call over, instead of
+              // surfacing the raw cap error (live: envelope=unopened tools=1/0).
+              // Only for our own cap or idle stop, never for a cancellation.
+              const recoveredUnopened =
+                capturedRecoverable &&
+                !messageStartEmitted &&
+                !ownSingleStepAbort &&
+                !streamClosed &&
+                streamedToolUseIds.size === 0 &&
+                !durableWritesRevoked &&
+                !requestAbort.abortSnapshot().aborted
+              if (recoveredUnopened) openUnstreamedEnvelope()
+              const canRecoverAsToolUse = capturedRecoverable && messageStartEmitted
 
               // Uncaptured streamed calls can recover only with a complete
               // client-visible envelope and no cancellation. The opt-in covers
@@ -7025,7 +7050,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 // Log the recovery at session level (not error) — it's a
                 // notable flow control event but not a failure for the client.
                 diagnosticLog.session(
-                  `${requestMeta.requestId} sdk_termination_recovered${uncapturedRecoveryActive ? "_uncaptured" : ""} ${formatSdkTermination(sdkTerm, {
+                  `${requestMeta.requestId} sdk_termination_recovered${uncapturedRecoveryActive ? "_uncaptured" : ""}${recoveredUnopened ? "_unopened" : ""} ${formatSdkTermination(sdkTerm, {
                     model,
                     requestSource,
                     isResume,

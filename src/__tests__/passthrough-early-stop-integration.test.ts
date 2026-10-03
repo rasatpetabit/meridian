@@ -2597,6 +2597,53 @@ describe("Integration: passthrough early stop", () => {
       expect(lookupSharedSession(`es-retry-stale-metadata-${TEST_RUN_ID}`)).toBeUndefined()
     })
 
+    it.each(["hook-only", "settled-metadata", "late-old-hook"])("a transparent retry forwards only the fresh capture with the same signature (%s)", async (scenario) => {
+      const abandoned = assistantMessage([
+        { type: "tool_use", id: "probe-sig-1", name: "read", input: { file_path: "p" } },
+      ])
+      const fresh = assistantMessage([
+        { type: "tool_use", id: "probe-sig-2", name: "read", input: { file_path: "p" } },
+      ])
+      mockAttemptScripts = [
+        {
+          messages: scenario === "settled-metadata"
+            ? [abandoned, userDenyMessage("probe-sig-1")]
+            : [{ type: "test_pre_tool_hook", tool_name: "read", tool_use_id: "probe-sig-1", tool_input: { file_path: "p" } }],
+          terminalError: new Error("API Error: 429 rate limit exceeded"),
+        },
+        {
+          messages: [
+            ...(scenario === "late-old-hook" ? [{
+              type: "test_callback",
+              run: async () => {
+                const abandonedHook = capturedQueryParamsAll[0].options.hooks.PreToolUse[0].hooks[0]
+                await abandonedHook({ tool_name: "read", tool_use_id: "late-abandoned", tool_input: { file_path: "p" } },
+                  undefined, { signal: new AbortController().signal })
+              },
+            }] : []),
+            fresh, userDenyMessage("probe-sig-2"), capped(),
+          ],
+          terminalError: new Error(CAPPED_TURN_ERROR),
+        },
+      ]
+      const res = await post(app, {
+        model: "claude-sonnet-4-5", max_tokens: 400, stream: true, tools: [READ_TOOL],
+        messages: [{ role: "user", content: "retry captured tool" }],
+      }, `es-retry-fresh-capture-signature-${scenario}`)
+      expect(res.status).toBe(200)
+      const body = await res.text()
+      expect(capturedQueryParamsAll).toHaveLength(2)
+      const toolIds = parseSSE(body).flatMap((event) => {
+        const block = event.data.content_block
+        if (event.event !== "content_block_start" || !block || typeof block !== "object"
+          || !("type" in block) || block.type !== "tool_use" || !("id" in block)) return []
+        return [block.id]
+      })
+      expect(toolIds).toEqual(["probe-sig-2"])
+      expect(body).not.toContain("probe-sig-1")
+      expect(body).toContain('"stop_reason":"tool_use"')
+    })
+
     it("a retry with its own metadata and capture still recovers that fresh turn", async () => {
       const fresh = assistantMessage([
         { type: "text", text: "fresh attempt text" },

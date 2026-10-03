@@ -94,6 +94,42 @@ describe("replay budget", () => {
     expect(contextWindowFor("haiku", "claude-sonnet-5-5")).toBe(200_000)
   })
 
+  // The SDK may answer with the configured fallback model, so the replay must
+  // fit whichever of the two windows is smaller.
+  it("budgets to the smaller of the primary and the configured fallback model", () => {
+    expect(replayBudgetFor("opus[1m]", undefined, "haiku")).toBe(replayBudgetFor("haiku"))
+    expect(replayReserveFor("opus[1m]", undefined, "haiku")).toBe(replayReserveFor("haiku"))
+    expect(replayBudgetFor("sonnet", "claude-sonnet-5-5", "haiku")).toBe(160_000)
+    // A fallback with at least the primary's window does not reduce capacity.
+    expect(replayBudgetFor("sonnet", "claude-sonnet-5-5", "opus[1m]")).toBe(836_000)
+    expect(replayBudgetFor("opus[1m]", undefined, "sonnet[1m]")).toBe(836_000)
+    expect(replayBudgetFor("sonnet", undefined, "opus[1m]")).toBe(160_000)
+    // The fallback's own sonnet alias resolves the same way as the primary's.
+    expect(replayBudgetFor("opus[1m]", "claude-sonnet-5-5", "sonnet")).toBe(836_000)
+    expect(replayBudgetFor("opus[1m]", "claude-sonnet-4-6", "sonnet")).toBe(160_000)
+    // An unset fallback (the SDK feature default is "") changes nothing.
+    for (const fallback of [undefined, ""]) {
+      expect(replayBudgetFor("opus[1m]", undefined, fallback)).toBe(836_000)
+      expect(replayBudgetFor("sonnet", "claude-sonnet-5-5", fallback)).toBe(836_000)
+      expect(replayBudgetFor("sonnet", undefined, fallback)).toBe(160_000)
+    }
+  })
+
+  it("trims a 1M-sized replay to a smaller fallback budget, keeping the live group and marker", () => {
+    const budget = replayBudgetFor("opus[1m]", undefined, "haiku")
+    const live = [user(text(1_000)), assistant(text(500)), user(text(1_000))]
+    const older = Array.from({ length: 6 }, () => [user(text(50_000)), assistant(text(50_000))]).flat()
+    const messages = [...older, ...live]
+    expect(trimReplayHistory(messages, replayBudgetFor("opus[1m]")).omittedMessages).toBe(0)
+    const result = trimReplayHistory(messages, budget)
+    expect(result.omittedMessages).toBeGreaterThan(0)
+    expect(result.messages.slice(-live.length)).toEqual(live)
+    expect(result.messages[0]).toEqual(user(
+      `[Meridian: ${result.omittedMessages} earlier messages (~${Math.round(result.omittedTokens)} tokens) were omitted from this replay to fit the model's context window.]`))
+    expect(result.messages.slice(1).reduce((sum, message) => sum + estimateTokens(message.content), 0)).toBeLessThanOrEqual(budget)
+    expect(trimReplayHistory(messages, budget)).toEqual(result)
+  })
+
   it("keeps the reserve proportionate to the window", () => {
     expect(replayReserveFor("opus[1m]")).toBe(64_000)
     expect(replayReserveFor("sonnet")).toBe(20_000)
@@ -111,6 +147,7 @@ describe("replay budget", () => {
       process.env.MERIDIAN_REPLAY_BUDGET_TOKENS = "4096"
       expect(replayBudgetFor("sonnet")).toBe(4096)
       expect(replayBudgetFor("opus[1m]")).toBe(4096)
+      expect(replayBudgetFor("opus[1m]", undefined, "haiku")).toBe(4096)
       for (const bad of ["0", "-1", "not-a-number", ""]) {
         process.env.MERIDIAN_REPLAY_BUDGET_TOKENS = bad
         expect(replayBudgetFor("sonnet")).toBe(160_000)

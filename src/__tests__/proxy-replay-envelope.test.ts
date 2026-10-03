@@ -15,6 +15,7 @@ import { installMcpToolsMock } from "./mcpToolsMock"
 import { estimateTokens, replayBudgetFor } from "../proxy/replayBudget"
 import { resetExtendedContextUnavailable } from "../proxy/models"
 import * as models from "../proxy/models"
+import * as sdkFeatures from "../proxy/sdkFeatures"
 let capturedPrompts: any[] = []
 let overflowFailures = 0
 let overflowMessage = "Claude Code returned an error result: Prompt is too long"
@@ -131,6 +132,34 @@ describe("bounded fresh replay", () => {
     expect(capturedPrompts[0]).toContain("were omitted from this replay")
     expect(capturedPrompts[0]).toContain("objective")
     expect(capturedPrompts[0]).toEndWith("live question")
+  })
+
+  // The SDK is handed the configured fallback model and may answer with it, so
+  // the replay is budgeted to the smaller window rather than the primary's.
+  it("budgets a 1M primary to a configured smaller fallback model", async () => {
+    const real = sdkFeatures.getFeaturesForAdapter
+    const features = spyOn(sdkFeatures, "getFeaturesForAdapter")
+      .mockImplementation(adapter => ({ ...real(adapter), fallbackModel: "haiku" }))
+    try {
+      const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
+      const res = await post(app, history(), {}, false, "claude-opus-5-5")
+      expect(res.status).toBe(200)
+      expect(capturedOptions[0].model).toBe("opus[1m]")
+      expect(capturedOptions[0].fallbackModel).toBe("haiku")
+      expect(capturedPrompts[0]).toContain("were omitted from this replay")
+      expect(capturedPrompts[0]).toEndWith("live question")
+    } finally {
+      features.mockRestore()
+    }
+  })
+
+  it("keeps the 1M primary budget when no fallback model is configured", async () => {
+    const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
+    const res = await post(app, history(), {}, false, "claude-opus-5-5")
+    expect(res.status).toBe(200)
+    expect(capturedOptions[0].model).toBe("opus[1m]")
+    expect(capturedOptions[0].fallbackModel).toBeUndefined()
+    expect(capturedPrompts[0]).not.toContain("were omitted from this replay")
   })
 
   it("does not trim plain sonnet at 200k when it resolves to Sonnet 5+ (#1212)", async () => {

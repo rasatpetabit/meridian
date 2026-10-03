@@ -40,14 +40,21 @@ export const REPLAY_RESERVE_TOKENS = 64_000
  *  English tokens, roughly half the window, for conversations that used to fit.
  *  Capping keeps the 1M budget byte-for-byte unchanged and lifts 200k models to
  *  the same ~80% share. Underestimates are still covered by the overflow retry. */
-export function replayReserveFor(model: string, resolvedSonnetModel?: string): number {
-  return Math.min(REPLAY_RESERVE_TOKENS, Math.floor(contextWindowFor(model, resolvedSonnetModel) * 0.1))
+export function replayReserveFor(model: string, resolvedSonnetModel?: string, fallbackModel?: string): number {
+  return Math.min(REPLAY_RESERVE_TOKENS, Math.floor(replayWindowFor(model, resolvedSonnetModel, fallbackModel) * 0.1))
 }
 
-export function replayBudgetFor(model: string, resolvedSonnetModel?: string): number {
+/** `fallbackModel` is the configured SDK fallback, which may answer in place
+ *  of the primary: the replay must fit the smaller of the two windows. */
+export function replayBudgetFor(model: string, resolvedSonnetModel?: string, fallbackModel?: string): number {
   const configured = replayBudgetOverride()
   if (configured !== undefined) return configured
-  return Math.floor(contextWindowFor(model, resolvedSonnetModel) * 0.9) - replayReserveFor(model, resolvedSonnetModel)
+  return Math.floor(replayWindowFor(model, resolvedSonnetModel, fallbackModel) * 0.9) - replayReserveFor(model, resolvedSonnetModel, fallbackModel)
+}
+
+function replayWindowFor(model: string, resolvedSonnetModel?: string, fallbackModel?: string): number {
+  const primary = contextWindowFor(model, resolvedSonnetModel)
+  return fallbackModel ? Math.min(primary, contextWindowFor(fallbackModel, resolvedSonnetModel)) : primary
 }
 
 /** Test-only override. Proving the trim against a real model otherwise needs a

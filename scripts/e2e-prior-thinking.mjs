@@ -4,22 +4,23 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, copyFile, rm, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
 
-const root = await mkdtemp('/tmp/meridian-prior-thinking-')
+const root = await mkdtemp(join(tmpdir(), 'meridian-prior-thinking-'))
 const credentials = process.env.E2E_CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
 const reportPath = process.env.E2E_REPORT_PATH
 for (const key of Object.keys(process.env)) {
   if (/^(MERIDIAN_|CLAUDE_PROXY_|ANTHROPIC_|CLAUDE_CODE_EXTRA_BODY|CLAUDE_CONFIG_DIR)/.test(key)) delete process.env[key]
 }
-await mkdir(join(root, 'auth'), { mode: 0o700 })
-await copyFile(join(credentials, '.credentials.json'), join(root, 'auth', '.credentials.json'))
-await mkdir(join(root, 'work'))
-await mkdir(join(root, 'config'))
 let setting = 'off'
 const upstream = []
+// Everything after the root exists runs inside one guard; teardown below
+// closes only what was opened and always removes the credential copy.
+let proxy
+let report
+const failures = []
 const relay = createServer(async (request, response) => {
   try {
     const chunks = []
@@ -69,24 +70,28 @@ const relay = createServer(async (request, response) => {
     console.error(JSON.stringify({ relayError: error.name }))
   }
 })
-relay.listen(0, '127.0.0.1')
-await once(relay, 'listening')
-Object.assign(process.env, {
-  MERIDIAN_CONFIG_DIR: join(root, 'config'), MERIDIAN_SESSION_DIR: join(root, 'sessions'),
-  MERIDIAN_WORKDIR: join(root, 'work'), MERIDIAN_PASSTHROUGH: '1', MERIDIAN_NO_FILE_CHANGES: '1',
-  MERIDIAN_NO_UPDATE_CHECK: '1', MERIDIAN_CREDENTIALS_READONLY: '1', CLAUDE_CONFIG_DIR: join(root, 'auth'),
-  MERIDIAN_PLUGIN_DIR: join(root, 'plugins'), MERIDIAN_PLUGIN_CONFIG: join(root, 'plugins.json'),
-  MERIDIAN_SILENT: '1', MERIDIAN_QUIET: '1',
-})
-const { startProxyServer } = await import('../dist/server.js')
-const proxy = await startProxyServer({ port: 0, host: '127.0.0.1', silent: true,
-  profiles: [{ id: 'e2e', type: 'api', baseUrl: `http://127.0.0.1:${relay.address().port}` }],
-})
-if (!proxy.server.listening) await once(proxy.server, 'listening')
-assert.notEqual(proxy.server.address().port, 3456)
-const report = { platform: process.platform, node: process.version, sdk: JSON.parse(await readFile(new URL('../node_modules/@anthropic-ai/claude-agent-sdk/package.json', import.meta.url))).version, cli: JSON.parse(await readFile(new URL('../node_modules/@anthropic-ai/claude-code/package.json', import.meta.url))).version, model: 'claude-opus-5-5', client: 'Pi-shaped HTTP', rows: [], upstream }
-const tool = { name: 'read', description: 'Read the outcome of the specified weighing.', input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }
 try {
+  await mkdir(join(root, 'auth'), { mode: 0o700 })
+  await copyFile(join(credentials, '.credentials.json'), join(root, 'auth', '.credentials.json'))
+  await mkdir(join(root, 'work'))
+  await mkdir(join(root, 'config'))
+  relay.listen(0, '127.0.0.1')
+  await once(relay, 'listening')
+  Object.assign(process.env, {
+    MERIDIAN_CONFIG_DIR: join(root, 'config'), MERIDIAN_SESSION_DIR: join(root, 'sessions'),
+    MERIDIAN_WORKDIR: join(root, 'work'), MERIDIAN_PASSTHROUGH: '1', MERIDIAN_NO_FILE_CHANGES: '1',
+    MERIDIAN_NO_UPDATE_CHECK: '1', MERIDIAN_CREDENTIALS_READONLY: '1', CLAUDE_CONFIG_DIR: join(root, 'auth'),
+    MERIDIAN_PLUGIN_DIR: join(root, 'plugins'), MERIDIAN_PLUGIN_CONFIG: join(root, 'plugins.json'),
+    MERIDIAN_SILENT: '1', MERIDIAN_QUIET: '1',
+  })
+  const { startProxyServer } = await import('../dist/server.js')
+  proxy = await startProxyServer({ port: 0, host: '127.0.0.1', silent: true,
+    profiles: [{ id: 'e2e', type: 'api', baseUrl: `http://127.0.0.1:${relay.address().port}` }],
+  })
+  if (!proxy.server.listening) await once(proxy.server, 'listening')
+  assert.notEqual(proxy.server.address().port, 3456)
+  report = { platform: process.platform, node: process.version, sdk: JSON.parse(await readFile(new URL('../node_modules/@anthropic-ai/claude-agent-sdk/package.json', import.meta.url))).version, cli: JSON.parse(await readFile(new URL('../node_modules/@anthropic-ai/claude-code/package.json', import.meta.url))).version, model: 'claude-opus-5-5', client: 'Pi-shaped HTTP', rows: [], upstream }
+  const tool = { name: 'read', description: 'Read the outcome of the specified weighing.', input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }
   for (setting of ['off', 'on']) {
     process.env.MERIDIAN_DROP_PRIOR_THINKING = setting === 'on' ? '1' : '0'
     const messages = []
@@ -183,10 +188,23 @@ try {
     upstream: upstream.slice(probeStart).map(row => ({ status: row.status, thinkingType: row.thinkingType, errorType: row.errorType })) }
   console.log(JSON.stringify({ budgetProbe: report.budgetProbe }))
   report.passed = true
-} finally {
-  if (reportPath) await writeFile(reportPath, JSON.stringify(report, null, 2), { mode: 0o600 })
-  await proxy.close()
-  relay.closeAllConnections()
-  await new Promise(resolve => relay.close(resolve))
-  await rm(root, { recursive: true, force: true })
+} catch (error) {
+  failures.push(error)
 }
+// Each step runs even when an earlier one failed. Failures are reported after
+// cleanup; the process then exits on its own, which it can do only once every
+// listener above has closed.
+async function teardown(step) {
+  try { await step() } catch (error) { failures.push(error) }
+}
+if (reportPath && report) await teardown(() => writeFile(reportPath, JSON.stringify(report, null, 2), { mode: 0o600 }))
+if (proxy) await teardown(() => proxy.close())
+if (relay.listening) {
+  await teardown(async () => {
+    relay.closeAllConnections()
+    await new Promise((resolve, reject) => relay.close(error => error ? reject(error) : resolve()))
+  })
+}
+await teardown(() => rm(root, { recursive: true, force: true }))
+for (const error of failures) console.error(error)
+if (failures.length) process.exitCode = 1

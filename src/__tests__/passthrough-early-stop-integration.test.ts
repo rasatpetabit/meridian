@@ -2542,6 +2542,100 @@ describe("Integration: passthrough early stop", () => {
     expect(body).toContain('"stop_reason":"tool_use"')
   })
 
+  // Unstreamed assistant metadata belongs to the SDK attempt that produced it.
+  // A transparent retry abandons that attempt; its turn was never shown to the
+  // client and must not become the envelope of a later attempt's capture.
+  describe("stream: unstreamed metadata across a transparent retry", () => {
+    const ABANDONED_ID = "msg_abandoned_attempt"
+    const abandonedAttempt = () => {
+      const turn = assistantMessage([{ type: "text", text: "abandoned attempt text" }])
+      turn.message.id = ABANDONED_ID
+      return { messages: [turn], terminalError: new Error("API Error: 429 rate limit exceeded") }
+    }
+    const capped = () => ({
+      type: "result", subtype: "error_max_turns", is_error: true, session_id: "test-session",
+    })
+    let savedDelay: string | undefined
+    beforeEach(() => {
+      savedDelay = process.env.MERIDIAN_RATE_LIMIT_BASE_DELAY_MS
+      process.env.MERIDIAN_RATE_LIMIT_BASE_DELAY_MS = "1"
+    })
+    afterEach(() => {
+      if (savedDelay === undefined) delete process.env.MERIDIAN_RATE_LIMIT_BASE_DELAY_MS
+      else process.env.MERIDIAN_RATE_LIMIT_BASE_DELAY_MS = savedDelay
+    })
+
+    it("a capture-only capped retry does not reuse the abandoned attempt's metadata", async () => {
+      mockAttemptScripts = [
+        abandonedAttempt(),
+        {
+          messages: [
+            { type: "test_pre_tool_hook", tool_name: "read", tool_use_id: "retry-capture-only", tool_input: { file_path: "r" } },
+            capped(),
+          ],
+          terminalError: new Error(CAPPED_TURN_ERROR),
+        },
+      ]
+
+      const res = await post(app, {
+        model: "claude-sonnet-4-5",
+        max_tokens: 400,
+        stream: true,
+        tools: [READ_TOOL],
+        messages: [{ role: "user", content: "retry then capture only" }],
+      }, "es-retry-stale-metadata")
+      expect(res.status).toBe(200)
+      const body = await res.text()
+      expect(capturedQueryParamsAll).toHaveLength(2)
+      const events = parseSSE(body)
+      expect(events.map((e: any) => e.event)).toEqual(["error"])
+      expect(body).not.toContain("message_start")
+      expect(body).not.toContain(ABANDONED_ID)
+      expect(body).not.toContain("abandoned attempt text")
+      expect(body).not.toContain("retry-capture-only")
+      expect(body).not.toContain('"stop_reason":"tool_use"')
+      expect(lookupSharedSession(`es-retry-stale-metadata-${TEST_RUN_ID}`)).toBeUndefined()
+    })
+
+    it("a retry with its own metadata and capture still recovers that fresh turn", async () => {
+      const fresh = assistantMessage([
+        { type: "text", text: "fresh attempt text" },
+        { type: "tool_use", id: "retry-fresh-capture", name: "read", input: { file_path: "f" } },
+      ])
+      fresh.message.id = "msg_fresh_attempt"
+      mockAttemptScripts = [
+        abandonedAttempt(),
+        {
+          messages: [fresh, userDenyMessage("retry-fresh-capture"), capped()],
+          terminalError: new Error(CAPPED_TURN_ERROR),
+        },
+      ]
+
+      const res = await post(app, {
+        model: "claude-sonnet-4-5",
+        max_tokens: 400,
+        stream: true,
+        tools: [READ_TOOL],
+        messages: [{ role: "user", content: "retry then fresh turn" }],
+      }, "es-retry-fresh-metadata")
+      expect(res.status).toBe(200)
+      const body = await res.text()
+      expect(capturedQueryParamsAll).toHaveLength(2)
+      expect(body).not.toContain("event: error")
+      expect(body).not.toContain(ABANDONED_ID)
+      expect(body).not.toContain("abandoned attempt text")
+      const events = parseSSE(body)
+      const starts = events.filter((e: any) => e.event === "message_start")
+      expect(starts).toHaveLength(1)
+      expect((starts[0]!.data.message as { id?: string }).id).toBe("msg_fresh_attempt")
+      expect(body).toContain("fresh attempt text")
+      const toolStarts = events.filter((e: any) =>
+        e.event === "content_block_start" && e.data?.content_block?.type === "tool_use")
+      expect(toolStarts.map((e: any) => e.data.content_block.id)).toEqual(["retry-fresh-capture"])
+      expect(body).toContain('"stop_reason":"tool_use"')
+    })
+  })
+
   // An empty text block is still an empty turn: content_block_start advances
   // the client block index, but without a text delta the client received no
   // actionable content. Keep the capped turn on the error path.

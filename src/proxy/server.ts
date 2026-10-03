@@ -5191,6 +5191,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   // before the API call — those are NOT client-visible and must
                   // not prevent retry. Only stream_event types become SSE output.
                   let didYieldClientEvent = false
+                  // Unstreamed assistant metadata belongs to the attempt that
+                  // produced it; a retried attempt's turn never reached the client.
+                  unstreamedAssistants.length = 0
                   // stderr emitted by THIS attempt's subprocess only — retries
                   // must not re-match a previous attempt's refusal text.
                   const attemptStderrStart = stderrLines.length
@@ -5285,6 +5288,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       currentSessionId = managedForkTarget?.sessionId
                       sdkUuidMap.length = 0
                       for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
+                      unstreamedAssistants.length = 0
                       yield* runSdkQueryAttempt(buildQueryOptions({
                         prompt: buildFreshPrompt(allMessages, sanitizeOpts, renderReplayToolName, replayBudgetFor(model, resolvedSonnetModel), "stream_resume_replay"),
                         model, workingDirectory, clientWorkingDirectory: promptClientWorkingDirectory, clientEnvironmentMayDifferFromProxy, systemContext, claudeExecutable,
@@ -5342,6 +5346,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       currentSessionId = managedForkTarget?.sessionId
                       sdkUuidMap.length = 0
                       for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
+                      unstreamedAssistants.length = 0
                       yield* runSdkQueryAttempt(buildQueryOptions({
                         prompt: buildFreshPrompt(allMessages, sanitizeOpts, renderReplayToolName, replayBudgetFor(model, resolvedSonnetModel), "stream_model_fallback"),
                         model, workingDirectory, clientWorkingDirectory: promptClientWorkingDirectory, clientEnvironmentMayDifferFromProxy, systemContext, claudeExecutable,

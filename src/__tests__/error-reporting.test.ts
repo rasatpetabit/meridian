@@ -282,7 +282,7 @@ describe("in a real process", () => {
     expect(crashed.code).toBe(baseline.code)
     expect(crashed.stderr).toContain("thrown")
 
-    await waitFor(() => received.length === 1 && spooled(spool).length === 0)
+    await waitFor(() => received.length === 1 && (!existsSync(spool) || readdirSync(spool).length === 0))
     expect(received).toHaveLength(1)
     const event = eventOf(received[0]!.body)
     expect(event.level).toBe("fatal")

@@ -7146,3 +7146,24 @@ runs. Require liveness answers during those holds, a random tool receipt and
 same-session recall, actual served-model confirmation and zero client exits.
 The direct gate regression additionally requires bounded join and eventual
 sensitive-file cleanup if disk publication remains stuck after child exit.
+
+## Prior thinking retention (opt-in)
+
+```sh
+npm run build
+node scripts/e2e-prior-thinking.mjs
+```
+
+Requires authenticated Claude Max credentials (default `~/.claude`, override
+`E2E_CLAUDE_CONFIG_DIR`). Uses a private disposable credential copy, config,
+workdir, SDK transcripts and ephemeral ports; never changes a running service.
+Optional `E2E_REPORT_PATH` writes only numeric/field-name JSON evidence. The
+harness drives Pi-shaped streaming HTTP with actual `claude-opus-5-5`, both
+flag settings, multi-turn answers and three sequential client tool calls. An
+in-memory upstream relay checks that, with the flag on, only the newest
+assistant message carries thinking; it
+never persists or prints prompts, transcripts or credentials. Finally closes
+owned listeners/SDK processes and deletes scratch state.
+
+Linux evidence and limitations:
+[drop-prior-thinking](docs/maintenance/evidence/drop-prior-thinking.md).

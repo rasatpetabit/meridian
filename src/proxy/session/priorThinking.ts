@@ -205,7 +205,13 @@ export function pruneStats(transcript: string, checkpointUuid?: string): PriorTh
  */
 async function projectDirectories(projects: string, projectDir: string): Promise<string[]> {
   const sources = new Set([projectDir.normalize("NFC")])
-  try { sources.add((await realpath(projectDir)).normalize("NFC")) } catch { /* A removed cwd keeps its literal name. */ }
+  try {
+    sources.add((await realpath(projectDir)).normalize("NFC"))
+  } catch (error) {
+    // A removed cwd keeps its literal name. Any other failure surfaces to the
+    // caller's nonfatal prune handling rather than guessing a location.
+    if (!(error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR"))) throw error
+  }
   const directories = new Set<string>()
   let entries: string[] | undefined
   for (const source of sources) {

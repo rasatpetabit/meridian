@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test"
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Options } from "@anthropic-ai/claude-agent-sdk"
+import type { Options, PreToolUseHookInput } from "@anthropic-ai/claude-agent-sdk"
 import { installSdkMock } from "./sdkMock"
 import { installLoggerMock } from "./loggerMock"
 import { installMcpToolsMock } from "./mcpToolsMock"
@@ -76,8 +76,10 @@ installSdkMock(() => ({
     const parent = prior.trim() ? JSON.parse(prior.trim().split("\n").at(-1)!).uuid : null
     const user = { type: "user", uuid: uid("user"), parentUuid: parent, sessionId, message: { role: "user", content: "turn" } }
     const rows: unknown[] = [user]
-    const events: unknown[] = []
-    const preHook = (options.hooks as any)?.PreToolUse?.[0]?.hooks?.[0]
+    type HookStep = { hook: PreToolUseHookInput }
+    const events: Array<Record<string, unknown> | HookStep> = []
+    const isHookStep = (event: Record<string, unknown> | HookStep): event is HookStep => "hook" in event
+    const preHook = options.hooks?.PreToolUse?.[0]?.hooks[0]
     const emit = (event: Record<string, unknown>) => events.push({ ...event, session_id: sessionId })
     if (step.kind === "text") {
       const id = `msg_text_${n}`
@@ -110,7 +112,10 @@ installSdkMock(() => ({
       // checkpoint_absent: the checkpoint the iterator reports is not in the file.
       const yielded = { ...a2, uuid: step.fault === "checkpoint_absent" ? uid("absent") : a2.uuid, message: { ...a2.message, type: "message", model: "claude-opus-5-5", stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 }, content: [thought, tool] }, parent_tool_use_id: null }
       emit(yielded)
-      events.push({ hook: { tool_name: "read", tool_use_id: callId, tool_input: tool.input } })
+      events.push({ hook: {
+        hook_event_name: "PreToolUse", session_id: sessionId, transcript_path: transcriptFile(options, sessionId), cwd: String(options.cwd),
+        tool_name: "read", tool_use_id: callId, tool_input: tool.input,
+      } })
       emit(deny)
       emit({ ...g2, message: { ...g2.message, type: "message", model: "claude-opus-5-5", stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } }, parent_tool_use_id: null })
     }
@@ -128,8 +133,8 @@ installSdkMock(() => ({
     } else if (step.fault !== "transcript_not_found") {
       writeFileSync(path, body, { mode: 0o600 })
     }
-    for (const event of events as Array<Record<string, any>>) {
-      if (event.hook) {
+    for (const event of events) {
+      if (isHookStep(event)) {
         if (preHook) await preHook(event.hook, undefined, { signal: new AbortController().signal })
         continue
       }

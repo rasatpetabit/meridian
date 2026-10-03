@@ -270,6 +270,48 @@ describe("prior thinking transcript location", () => {
       await rm(root, { recursive: true, force: true })
     }
   })
+  it("locates a removed or non-directory cwd by its literal project name", async () => {
+    const root = await mkdtemp(join(tmpdir(), "meridian-thinking-missing-cwd-"))
+    try {
+      const plain = join(root, "plain-file")
+      await writeFile(plain, "")
+      for (const cwd of [join(root, "removed"), join(plain, "child")]) {
+        const sessionId = crypto.randomUUID()
+        const owned = join(root, "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"))
+        await mkdir(owned, { recursive: true })
+        const original = assistant("a", "old", [thinking, text]) + "\n"
+        await writeFile(join(owned, `${sessionId}.jsonl`), original, { mode: 0o600 })
+        const stats = await prunePriorThinkingFile({ sessionId, configDir: root, projectDir: cwd })
+        expect(stats.blocks).toBe(1)
+        expect(await readFile(join(owned, `${sessionId}.jsonl`), "utf8")).toBe(prunePriorThinkingTranscript(original))
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+  it("surfaces an unexpected cwd resolution errno without touching the transcript", async () => {
+    const root = await mkdtemp(join(tmpdir(), "meridian-thinking-cwd-errno-"))
+    try {
+      // A symlink loop makes realpath fail with ELOOP: neither a removed cwd
+      // nor a non-directory component, so it must not be guessed around.
+      const cwd = join(root, "loop-a")
+      await symlink(join(root, "loop-b"), cwd)
+      await symlink(cwd, join(root, "loop-b"))
+      const sessionId = crypto.randomUUID()
+      const owned = join(root, "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"))
+      await mkdir(owned, { recursive: true })
+      const original = assistant("a", "old", [thinking, text]) + "\n"
+      await writeFile(join(owned, `${sessionId}.jsonl`), original, { mode: 0o600 })
+      const refused = await prunePriorThinkingFile({ sessionId, configDir: root, projectDir: cwd }).then(
+        () => undefined, (error: unknown) => error)
+      expect(refused).toBeInstanceOf(Error)
+      expect(refused).not.toBeInstanceOf(PriorThinkingPruneError)
+      expect(refused).toMatchObject({ code: "ELOOP" })
+      expect(await readFile(join(owned, `${sessionId}.jsonl`), "utf8")).toBe(original)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
   it("refuses a symlinked or non-regular transcript without touching it", async () => {
     const root = await mkdtemp(join(tmpdir(), "meridian-thinking-type-"))
     const cwd = join(root, "work")

@@ -49,13 +49,14 @@ export type {
 export { runTransformHook, runObserveHook, buildPipeline, createRequestContext } from "./transform"
 import { claudeLog } from "../logger"
 import { replayBudgetFor, trimReplayHistory } from "./replayBudget"
-import { PASSTHROUGH_DENY_REASON } from "./passthroughDenial"
+import { PASSTHROUGH_DENY_REASON, PASSTHROUGH_HANDLED_REASON, PASSTHROUGH_NOT_FORWARDED_REASON } from "./passthroughDenial"
 import { exec as execCallback } from "child_process"
 import { promisify } from "util"
 import { randomUUID } from "crypto"
 import { withClaudeLogContext } from "../logger"
 import { createPassthroughMcpServer, createPassthroughReplayToolNameRenderer, resolveClientToolName, normalizeToolInput, hasRepairableToolInput, computeToolSetKey, toolUseSignature, PASSTHROUGH_MCP_NAME, PASSTHROUGH_MCP_PREFIX, passthroughMcpPrefix, autoDeferDecision, getAutoDeferThreshold } from "./passthroughTools"
 import { describeLocalBootIdentity } from "./session/processIncarnation"
+import { PriorThinkingPruneError, prunePriorThinkingFile } from "./session/priorThinking"
 import { detectServerTools, serverToolErrorMessage } from "./tools"
 import { clientAbortDisposition, coalesceCompleteToolResultContinuation, createEarlyStopTracker, isClientForwardedToolUse, noteAssistantMessage, noteUserContent, settledToolCallAssistantUuid, settlesCheckpointThenContinues, shouldEarlyStop, trackerCoversStreamedCalls } from "./passthroughEarlyStop"
 import { checkEmptyToolInputs, checkUndeliveredToolUses, type EnvelopeViolation } from "./envelopeIntegrity"
@@ -959,6 +960,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     requestMeta: RequestMeta,
     mode: string,
     activeLocators: readonly TranscriptLocator[],
+    thinkingCheckpoint?: () => string | undefined,
   ) {
     // Measured around the wait itself, not read from the granted lease: an
     // aborted wait never produces a lease, and crediting queue time only on
@@ -983,6 +985,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     let activeTranscriptLease: Awaited<ReturnType<typeof acquireActiveTranscriptLease>> | undefined
     let processGate: Awaited<ReturnType<typeof createSdkProcessGate>> | undefined
     let writerJoined = true
+    let attemptCompleted = false
     const admissionLifecycleOptions = { ...sessionGcOptions, admissionSignal: signal }
     try {
       for (const locator of activeLocators) {
@@ -1008,8 +1011,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       }
       signal.throwIfAborted()
       sdkQuery = query(params)
-      yield* guardUpstreamIdle(sdkQuery, UPSTREAM_IDLE_MS, (sinceLastMs) =>
-        claudeLog("upstream.stalled", { mode, sinceLastMs }), undefined, logLateIdleDeadline(mode))
+      for await (const event of guardUpstreamIdle(sdkQuery, UPSTREAM_IDLE_MS, (sinceLastMs) =>
+        claudeLog("upstream.stalled", { mode, sinceLastMs }), undefined, logLateIdleDeadline(mode))) {
+        // A canonical capped tool result can be followed by the SDK's maxTurns
+        // exception. It still proves the target was durably written.
+        if (event.type === "result") attemptCompleted = true
+        yield event
+      }
+      attemptCompleted = true
     } finally {
       try {
         // Production Query objects expose close(); test doubles and older SDK
@@ -1021,7 +1030,35 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           throw new SessionLifecycleError("SDK writer could not be joined; transcript remains fenced")
         }
         if (activeTranscriptLease) {
-          await releaseJoinedTranscriptLease(activeTranscriptLease, sessionGcOptions)
+          try {
+            // Prune only the newly written fork, never its immutable resume source.
+            // Joining the SDK and retaining its cross-process lease fences readers,
+            // writers and GC until the atomic replacement is durable. UUIDs and
+            // checkpoint rows survive; the next resume inherits the pruned prefix.
+            if (attemptCompleted && envBool("DROP_PRIOR_THINKING") && params.options?.sessionId) {
+              // Pruning is an optimization over an already-delivered, billed turn.
+              // Any refusal, including an unleased target (a locator bookkeeping
+              // mismatch, not a fence violation: the writer is joined and the
+              // lease held above), leaves the transcript byte-identical and the
+              // turn intact. Only fence violations propagate. Counts only, never content.
+              try {
+                const target = activeLocators.find(locator => locator.sessionId === params.options?.sessionId)
+                if (!target) throw new PriorThinkingPruneError("target_not_leased")
+                const stats = await prunePriorThinkingFile(target, thinkingCheckpoint?.())
+                claudeLog("session.prior_thinking_pruned", { mode, ...stats })
+              } catch (error) {
+                if (error instanceof SessionLifecycleError) throw error
+                claudeLog("session.prior_thinking_prune_failed", {
+                  mode,
+                  reason: error instanceof PriorThinkingPruneError
+                    ? error.reason
+                    : error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : "unexpected",
+                })
+              }
+            }
+          } finally {
+            await releaseJoinedTranscriptLease(activeTranscriptLease, sessionGcOptions)
+          }
         }
       } finally {
         requestMeta.sdkActiveDurationMs += Date.now() - startedAt
@@ -2237,6 +2274,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
         // Overlay profile-specific env vars (e.g. CLAUDE_CONFIG_DIR for multi-account)
         const profileEnv = { ...sdkModelDefaults, ...cleanEnv, ...profile.env }
+        // The Sonnet the SDK will actually serve (query.ts spreads the explicit
+        // pin last). Plain `sonnet` on Sonnet 5+ has a native 1M window, so the
+        // replay budget must not assume 200k from the alias alone (#1212).
+        const resolvedSonnetModel = envOverrides?.ANTHROPIC_DEFAULT_SONNET_MODEL ?? profileEnv.ANTHROPIC_DEFAULT_SONNET_MODEL
         const profileCredentialStore = credentialStoreForProfile(profile)
 
         // Drops transport metadata some clients pass through `system`.
@@ -3103,7 +3144,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       const freshReplay = !isResume && !resumeSessionId
       // Client usage describes its resumed context, not the fresh transcript;
       // derive replay capacity from the actual SDK model's window instead.
-      let currentReplayBudget = replayBudgetFor(model)
+      let currentReplayBudget = replayBudgetFor(model, resolvedSonnetModel)
       let replayTrimRetries = 0
       let replayOmittedMessages = 0
       const trimReplay = (attempt: number, reason?: string): boolean => {
@@ -3385,7 +3426,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         if (!freshReplay) return
         // Stripping [1m] changes capacity, not only billing: the previously
         // valid replay must fit the smaller window before another SDK call.
-        currentReplayBudget = replayBudgetFor(model)
+        currentReplayBudget = replayBudgetFor(model, resolvedSonnetModel)
         trimReplay(replayTrimRetries, reason)
         rebuildReplayPrompt()
       }
@@ -3400,7 +3441,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const shrunkBudget = counts
           ? Math.floor(currentReplayBudget * (Number(counts[2]) / Number(counts[1])) * 0.9)
           : Math.floor(currentReplayBudget * 0.5)
-        currentReplayBudget = Math.min(shrunkBudget, replayBudgetFor(model))
+        currentReplayBudget = Math.min(shrunkBudget, replayBudgetFor(model, resolvedSonnetModel))
         // A live tail is indivisible. Reissuing the same kept history only
         // spends another upstream attempt to obtain the identical overflow.
         if (!trimReplay(replayTrimRetries + 1)) return false
@@ -3756,19 +3797,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 if (isExactDuplicate || isPostCheckpointCall) {
                   return {
                     decision: "block" as const,
-                    reason:
-                      "This tool call has already been handled by the client-facing turn — do not repeat it. " +
-                      "Do not call additional tools and do not generate further text — end your turn now.",
+                    reason: PASSTHROUGH_HANDLED_REASON,
                   }
                 }
                 if (isSameToolRepeat || exceedsForcedSingle) {
                   return {
                     decision: "block" as const,
-                    reason:
-                      "This tool call was NOT executed and was not forwarded. Your earlier tool call(s) " +
-                      "are being returned to the client now; their results arrive next turn. Re-issue this " +
-                      "call after that if it is still needed. Do not call additional tools and do not " +
-                      "generate further text — end your turn now.",
+                    reason: PASSTHROUGH_NOT_FORWARDED_REASON,
                   }
                 }
                 return {
@@ -3941,7 +3976,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     advisorModel,
                   }, requestAbort.controller)
                   attemptMaxTurns = attemptQuery.options.maxTurns
-                  for await (const event of runSdkQueryAttempt(attemptQuery, requestAbort.controller.signal, requestMeta, "non_stream", managedSdkAttemptLocators())) {
+                  for await (const event of runSdkQueryAttempt(attemptQuery, requestAbort.controller.signal, requestMeta, "non_stream", managedSdkAttemptLocators(), () => nextPassthroughToolCallAssistantUuid)) {
                     // Capture Claude Max subscription quota updates emitted by
                     // the SDK as rate_limit_event. We snapshot them in this
                     // profile's slot of the (per-profile-scoped) rate limit
@@ -4030,7 +4065,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     sdkUuidMap.length = 0
                     for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
                     yield* runSdkQueryAttempt(buildQueryOptions({
-                      prompt: buildFreshPrompt(allMessages, sanitizeOpts, renderReplayToolName, replayBudgetFor(model), "non_stream_resume_replay"),
+                      prompt: buildFreshPrompt(allMessages, sanitizeOpts, renderReplayToolName, replayBudgetFor(model, resolvedSonnetModel), "non_stream_resume_replay"),
                       model, workingDirectory, clientWorkingDirectory: promptClientWorkingDirectory, clientEnvironmentMayDifferFromProxy, systemContext, claudeExecutable,
                       passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools, earlyStop: earlyStopEnabled,
                       resumeSessionId: undefined, isUndo: false, resumeSessionAtUuid: undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
@@ -4045,7 +4080,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
                       advisorModel,
-                    }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators())
+                    }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators(), () => nextPassthroughToolCallAssistantUuid)
                     return
                   }
 
@@ -4091,7 +4126,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     sdkUuidMap.length = 0
                     for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
                     yield* runSdkQueryAttempt(buildQueryOptions({
-                      prompt: buildFreshPrompt(allMessages, sanitizeOpts, renderReplayToolName, replayBudgetFor(model), "non_stream_model_fallback"),
+                      prompt: buildFreshPrompt(allMessages, sanitizeOpts, renderReplayToolName, replayBudgetFor(model, resolvedSonnetModel), "non_stream_model_fallback"),
                       model, workingDirectory, clientWorkingDirectory: promptClientWorkingDirectory, clientEnvironmentMayDifferFromProxy, systemContext, claudeExecutable,
                       passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools, earlyStop: earlyStopEnabled,
                       resumeSessionId: undefined, isUndo: false, resumeSessionAtUuid: undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
@@ -4106,7 +4141,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
                       advisorModel,
-                    }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators())
+                    }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators(), () => nextPassthroughToolCallAssistantUuid)
                     return
                   }
 
@@ -5131,7 +5166,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     }, requestAbort.controller)
                     attemptMaxTurns = attemptQuery.options.maxTurns
                     lastAttemptMaxTurns = attemptMaxTurns
-                    for await (const event of runSdkQueryAttempt(attemptQuery, requestAbort.controller.signal, requestMeta, "stream", managedSdkAttemptLocators())) {
+                    for await (const event of runSdkQueryAttempt(attemptQuery, requestAbort.controller.signal, requestMeta, "stream", managedSdkAttemptLocators(), () => nextPassthroughToolCallAssistantUuid)) {
                       // Same SDK rate-limit capture as the non-stream path.
                       if ((event as any).type === "rate_limit_event") {
                         rateLimitStore.record(profile.id, (event as any).rate_limit_info)
@@ -5199,7 +5234,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       sdkUuidMap.length = 0
                       for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
                       yield* runSdkQueryAttempt(buildQueryOptions({
-                        prompt: buildFreshPrompt(allMessages, sanitizeOpts, renderReplayToolName, replayBudgetFor(model), "stream_resume_replay"),
+                        prompt: buildFreshPrompt(allMessages, sanitizeOpts, renderReplayToolName, replayBudgetFor(model, resolvedSonnetModel), "stream_resume_replay"),
                         model, workingDirectory, clientWorkingDirectory: promptClientWorkingDirectory, clientEnvironmentMayDifferFromProxy, systemContext, claudeExecutable,
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools, earlyStop: earlyStopEnabled,
                         resumeSessionId: undefined, isUndo: false, resumeSessionAtUuid: undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
@@ -5214,7 +5249,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                           ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                           : undefined,
                         advisorModel,
-                      }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "stream_fresh", managedSdkAttemptLocators())
+                      }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "stream_fresh", managedSdkAttemptLocators(), () => nextPassthroughToolCallAssistantUuid)
                       return
                     }
 
@@ -5256,7 +5291,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       sdkUuidMap.length = 0
                       for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
                       yield* runSdkQueryAttempt(buildQueryOptions({
-                        prompt: buildFreshPrompt(allMessages, sanitizeOpts, renderReplayToolName, replayBudgetFor(model), "stream_model_fallback"),
+                        prompt: buildFreshPrompt(allMessages, sanitizeOpts, renderReplayToolName, replayBudgetFor(model, resolvedSonnetModel), "stream_model_fallback"),
                         model, workingDirectory, clientWorkingDirectory: promptClientWorkingDirectory, clientEnvironmentMayDifferFromProxy, systemContext, claudeExecutable,
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools, earlyStop: earlyStopEnabled,
                         resumeSessionId: undefined, isUndo: false, resumeSessionAtUuid: undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
@@ -5271,7 +5306,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                           ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                           : undefined,
                         advisorModel,
-                      }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "stream_fresh", managedSdkAttemptLocators())
+                      }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "stream_fresh", managedSdkAttemptLocators(), () => nextPassthroughToolCallAssistantUuid)
                       return
                     }
 
@@ -6203,7 +6238,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "silent_recovery", [
                     recoveryForkSource,
                     recoveryForkTarget,
-                  ])) {
+                  ], () => recoveryToolCallAssistantUuid)) {
                     const recoveryMessage = event as any
                     observePriorityAttemptMessage(recoveryMessage)
                     if (recoveryMessage.session_id) {

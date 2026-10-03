@@ -6921,6 +6921,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               // Only for our own cap or idle stop, never for a cancellation.
               const recoveredUnopened =
                 capturedRecoverable &&
+                // A permission-hook capture alone does not establish an assistant envelope.
+                unstreamedAssistants.length > 0 &&
                 !messageStartEmitted &&
                 !ownSingleStepAbort &&
                 !streamClosed &&

@@ -56,7 +56,6 @@ import { randomUUID } from "crypto"
 import { withClaudeLogContext } from "../logger"
 import { createPassthroughMcpServer, createPassthroughReplayToolNameRenderer, resolveClientToolName, normalizeToolInput, hasRepairableToolInput, computeToolSetKey, toolUseSignature, PASSTHROUGH_MCP_NAME, PASSTHROUGH_MCP_PREFIX, passthroughMcpPrefix, autoDeferDecision, getAutoDeferThreshold } from "./passthroughTools"
 import { describeLocalBootIdentity } from "./session/processIncarnation"
-import { PriorThinkingPruneError, prunePriorThinkingFile } from "./session/priorThinking"
 import { detectServerTools, serverToolErrorMessage } from "./tools"
 import { clientAbortDisposition, coalesceCompleteToolResultContinuation, createEarlyStopTracker, isClientForwardedToolUse, noteAssistantMessage, noteUserContent, settledToolCallAssistantUuid, settlesCheckpointThenContinues, shouldEarlyStop, trackerCoversStreamedCalls } from "./passthroughEarlyStop"
 import { checkEmptyToolInputs, checkUndeliveredToolUses, type EnvelopeViolation } from "./envelopeIntegrity"
@@ -960,7 +959,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     requestMeta: RequestMeta,
     mode: string,
     activeLocators: readonly TranscriptLocator[],
-    thinkingCheckpoint?: () => string | undefined,
   ) {
     // Measured around the wait itself, not read from the granted lease: an
     // aborted wait never produces a lease, and crediting queue time only on
@@ -985,7 +983,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     let activeTranscriptLease: Awaited<ReturnType<typeof acquireActiveTranscriptLease>> | undefined
     let processGate: Awaited<ReturnType<typeof createSdkProcessGate>> | undefined
     let writerJoined = true
-    let attemptCompleted = false
     const admissionLifecycleOptions = { ...sessionGcOptions, admissionSignal: signal }
     try {
       for (const locator of activeLocators) {
@@ -1013,12 +1010,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       sdkQuery = query(params)
       for await (const event of guardUpstreamIdle(sdkQuery, UPSTREAM_IDLE_MS, (sinceLastMs) =>
         claudeLog("upstream.stalled", { mode, sinceLastMs }), undefined, logLateIdleDeadline(mode))) {
-        // A canonical capped tool result can be followed by the SDK's maxTurns
-        // exception. It still proves the target was durably written.
-        if (event.type === "result") attemptCompleted = true
         yield event
       }
-      attemptCompleted = true
     } finally {
       try {
         // Production Query objects expose close(); test doubles and older SDK
@@ -1030,35 +1023,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           throw new SessionLifecycleError("SDK writer could not be joined; transcript remains fenced")
         }
         if (activeTranscriptLease) {
-          try {
-            // Prune only the newly written fork, never its immutable resume source.
-            // Joining the SDK and retaining its cross-process lease fences readers,
-            // writers and GC until the atomic replacement is durable. UUIDs and
-            // checkpoint rows survive; the next resume inherits the pruned prefix.
-            if (attemptCompleted && envBool("DROP_PRIOR_THINKING") && params.options?.sessionId) {
-              // Pruning is an optimization over an already-delivered, billed turn.
-              // Any refusal, including an unleased target (a locator bookkeeping
-              // mismatch, not a fence violation: the writer is joined and the
-              // lease held above), leaves the transcript byte-identical and the
-              // turn intact. Only fence violations propagate. Counts only, never content.
-              try {
-                const target = activeLocators.find(locator => locator.sessionId === params.options?.sessionId)
-                if (!target) throw new PriorThinkingPruneError("target_not_leased")
-                const stats = await prunePriorThinkingFile(target, thinkingCheckpoint?.())
-                claudeLog("session.prior_thinking_pruned", { mode, ...stats })
-              } catch (error) {
-                if (error instanceof SessionLifecycleError) throw error
-                claudeLog("session.prior_thinking_prune_failed", {
-                  mode,
-                  reason: error instanceof PriorThinkingPruneError
-                    ? error.reason
-                    : error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : "unexpected",
-                })
-              }
-            }
-          } finally {
-            await releaseJoinedTranscriptLease(activeTranscriptLease, sessionGcOptions)
-          }
+          // Resumed transcripts are provider input, not just response archives.
+          // Even completed tool steps may already be part of a written cache
+          // prefix. Never prune thinking after a query: the next fork must
+          // inherit the exact sent history until an explicit reset/replay.
+          await releaseJoinedTranscriptLease(activeTranscriptLease, sessionGcOptions)
         }
       } finally {
         requestMeta.sdkActiveDurationMs += Date.now() - startedAt
@@ -4008,7 +3977,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     advisorModel,
                   }, requestAbort.controller)
                   attemptMaxTurns = attemptQuery.options.maxTurns
-                  for await (const event of runSdkQueryAttempt(attemptQuery, requestAbort.controller.signal, requestMeta, "non_stream", managedSdkAttemptLocators(), () => nextPassthroughToolCallAssistantUuid)) {
+                  for await (const event of runSdkQueryAttempt(attemptQuery, requestAbort.controller.signal, requestMeta, "non_stream", managedSdkAttemptLocators())) {
                     // Capture Claude Max subscription quota updates emitted by
                     // the SDK as rate_limit_event. We snapshot them in this
                     // profile's slot of the (per-profile-scoped) rate limit
@@ -4112,7 +4081,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
                       advisorModel,
-                    }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators(), () => nextPassthroughToolCallAssistantUuid)
+                    }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators())
                     return
                   }
 
@@ -4173,7 +4142,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
                       advisorModel,
-                    }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators(), () => nextPassthroughToolCallAssistantUuid)
+                    }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators())
                     return
                   }
 
@@ -5237,7 +5206,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 activeStreamAttempt = token
                 try {
                   const attemptQuery = buildAttempt(sdkHooksFor(token))
-                  yield* runSdkQueryAttempt(attemptQuery, requestAbort.controller.signal, requestMeta, mode, managedSdkAttemptLocators(), () => nextPassthroughToolCallAssistantUuid)
+                  yield* runSdkQueryAttempt(attemptQuery, requestAbort.controller.signal, requestMeta, mode, managedSdkAttemptLocators())
                 } finally {
                   if (activeStreamAttempt === token) activeStreamAttempt = undefined
                   releaseHeldDenies(`${mode}_attempt_end`)
@@ -6374,7 +6343,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "silent_recovery", [
                     recoveryForkSource,
                     recoveryForkTarget,
-                  ], () => recoveryToolCallAssistantUuid)) {
+                  ])) {
                     const recoveryMessage = event as any
                     observePriorityAttemptMessage(recoveryMessage)
                     if (recoveryMessage.session_id) {

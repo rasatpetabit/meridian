@@ -28,7 +28,7 @@ Environment variables, endpoints, authentication, SDK feature toggles, passthrou
 | `MERIDIAN_TELEMETRY_SIZE` | `CLAUDE_PROXY_TELEMETRY_SIZE` | `1000` | Telemetry ring buffer size, in rows. Pool routing writes one row **per account attempted**, so a request that failed over twice spends three. `/telemetry` reports what is actually held. |
 | `MERIDIAN_DIAGNOSTIC_LOG_SIZE` | `CLAUDE_PROXY_DIAGNOSTIC_LOG_SIZE` | `500` | Diagnostic log ring buffer size (the Logs tab and `GET /telemetry/logs`) |
 | `MERIDIAN_NO_FILE_CHANGES` | `CLAUDE_PROXY_NO_FILE_CHANGES` | unset | Disable "Files changed" summary in responses |
-| `MERIDIAN_DROP_PRIOR_THINKING` | `CLAUDE_PROXY_DROP_PRIOR_THINKING` | unset | Set to `1` to remove prior assistant thinking/signatures from Meridian-owned Claude SDK transcripts before their next resume. Thinking still streams to the client. Only the pending tool call's API message keeps its thinking (the newest one holding a tool call the client has not answered); earlier steps of the same tool loop and completed turns keep none. This reduces recurring input/context usage but sacrifices prior reasoning continuity and rewrites the affected prompt-cache suffix once. Off by default; see [Prior thinking retention](#prior-thinking-retention). |
+| `MERIDIAN_DROP_PRIOR_THINKING` | `CLAUDE_PROXY_DROP_PRIOR_THINKING` | ignored | Deprecated: retained SDK thinking is no longer pruned because it can already be part of a written prompt-cache prefix. See [Prior thinking retention](#prior-thinking-retention). |
 | `MERIDIAN_STRIP_THINKING` | `CLAUDE_PROXY_STRIP_THINKING` | unset | Set to `1` to strip raw `<thinking>` tags from user-authored prompt text. Off by default — `<thinking>` is a common chain-of-thought convention in hand-written prompts (#720); enable only if your harness is observed leaking it verbatim. |
 | `MERIDIAN_SONNET_MODEL` | `CLAUDE_PROXY_SONNET_MODEL` | `sonnet` | Sonnet 4.x context tier: `sonnet` (200k, default) or `sonnet[1m]` (1M, requires Extra Usage†). No effect on Sonnet 5 and later (the default pin), which run with a native 1M window on every plan without Extra Usage. Not to be confused with `MERIDIAN_DEFAULT_SONNET_MODEL` below, which pins a concrete model id, not a context tier. |
 | `MERIDIAN_FABLE_MODEL` | `CLAUDE_PROXY_FABLE_MODEL` | `fable[1m]` | Fable context tier opt-out: set to `fable` to disable the 1M extended context window and stay on the 200k base variant (also governs Mythos, which rides the Fable tier). `fable[1m]` is a documented no-op. Not to be confused with `MERIDIAN_DEFAULT_FABLE_MODEL` below, which pins a concrete model id, not a context tier. |
@@ -84,46 +84,26 @@ Environment variables, endpoints, authentication, SDK feature toggles, passthrou
 
 ### Prior thinking retention
 
-`MERIDIAN_DROP_PRIOR_THINKING=1` (legacy alias
-`CLAUDE_PROXY_DROP_PRIOR_THINKING=1`) removes `thinking` and
-`redacted_thinking` blocks, including opaque signatures, from older assistant
-messages in Meridian-owned Claude SDK transcripts. It does **not** disable
-thinking generation, filter the current response, or change client history.
-Pi continues displaying streamed thinking and signatures as before. The
-`MERIDIAN_STRIP_THINKING` user-text sanitizer is unrelated.
+Meridian preserves thinking and opaque signatures in retained SDK transcripts.
+Completed tool steps can already have been sent as input on an earlier request;
+deleting their reasoning before the next resume rewrites that cache-keyed prefix.
+`MERIDIAN_DROP_PRIOR_THINKING` and its legacy alias
+`CLAUDE_PROXY_DROP_PRIOR_THINKING` are therefore deprecated and ignored, even
+when set to `1`. Thinking generation and client-visible streaming are unchanged.
+The `MERIDIAN_STRIP_THINKING` user-text sanitizer is unrelated.
 
-After the SDK child exits, Meridian atomically prunes only the newly written
-transcript while holding its cross-process writer lease. The immutable resume
-source remains available for rollback. All UUID/parent UUID links, checkpoint
-rows and non-thinking content survive. Content fragments sharing an API
-message ID are retained or pruned together. A completed text turn needs no
-thinking on its next resume. In an open tool loop only the API message holding
-the tool call the client has not yet answered keeps its thinking, including
-every fragment belonging to it; earlier steps of the same loop keep none, which
-`claude-opus-5-5` accepts on the tool_result continuation. Passthrough hook
-blocks are not answers, and hidden digest and sidechain messages are never
-retained for this. An API message whose whole content is thinking is left
-untouched so no message is emptied. A prune that cannot run is logged
-(`session.prior_thinking_prune_failed`, reason only) and leaves the transcript
-and the turn intact; a successful one logs counts
-(`session.prior_thinking_pruned`). Older blocks
-are never restored into the continuing branch. Undo forks the selected durable
-source, whose retained thinking is pruned under the same policy before another
-resume. Fresh structured replay includes assistant text and tool-call context,
-never client-echoed thinking.
+The SDK writer is still joined and its lifecycle lease released normally, but
+Meridian does not rewrite the transcript afterward. Existing reset, compaction,
+undo/checkpoint rewind and fresh replay paths retain their existing semantics.
+Fresh structured replay still omits client-echoed thinking; this change does not
+restore reasoning already removed from a retained branch.
 
-The trade-off is reduced reasoning continuity in exchange for less recurring
-input/context usage. Removing a retained block rewrites that prompt-cache
-suffix once; stable earlier content can still be read from cache. In tool loops,
-the newest required thinking can cause another suffix rewrite when it becomes
-old. Disabling the flag stops future pruning but cannot recover removed blocks
-in the continuing branch. Original rollback transcripts and client-side saved
-sessions can still contain them: this is context retention, not secure erasure.
-
-Validated on Linux with Agent SDK 0.2.141, Claude Code 2.1.284 and
-`claude-opus-5-5`. Other models/platforms require their own live gate. The
-opt-in harness is `npm run build && node scripts/e2e-prior-thinking.mjs`; it
-uses an isolated credential copy and state, never a running Meridian service.
+Keeping reasoning increases retained input/context size relative to pruning.
+Whether that costs more overall depends on cache reuse, model billing and context
+resets; no live savings are promised. See the [offline cache-prefix regression
+evidence](maintenance/evidence/cache-prefix-stability.md). The earlier
+[pruning measurements](maintenance/evidence/drop-prior-thinking.md) describe the
+retired behavior, not the current contract.
 
 ### Read-only credentials
 

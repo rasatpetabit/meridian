@@ -1,5 +1,7 @@
-// Opt-in: npm run build && node scripts/e2e-prior-thinking.mjs
-// Isolated state/auth copy, actual SDK + Opus 5.5, Pi-shaped streaming HTTP.
+// Live opt-in cost probe (requires separate authorization): npm run build && node scripts/e2e-prior-thinking.mjs
+// DROP_PRIOR_THINKING is retired; both flag settings now preserve retained history.
+// Isolated state/auth copy, actual SDK + live model (E2E_MODEL, default Opus 5.5),
+// Pi-shaped streaming HTTP.
 // Only numeric/field-name evidence is emitted or persisted. No raw transcripts.
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, copyFile, rm, writeFile, readFile } from 'node:fs/promises'
@@ -11,6 +13,8 @@ import { createServer } from 'node:http'
 const root = await mkdtemp(join(tmpdir(), 'meridian-prior-thinking-'))
 const credentials = process.env.E2E_CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
 const reportPath = process.env.E2E_REPORT_PATH
+// Read the model input before the scrub below; unset keeps the Opus default.
+const model = process.env.E2E_MODEL || 'claude-opus-5-5'
 for (const key of Object.keys(process.env)) {
   if (/^(MERIDIAN_|CLAUDE_PROXY_|ANTHROPIC_|CLAUDE_CODE_EXTRA_BODY|CLAUDE_CONFIG_DIR)/.test(key)) delete process.env[key]
 }
@@ -39,7 +43,7 @@ const relay = createServer(async (request, response) => {
         const plain = message.role === 'user' && (typeof message.content === 'string' || !message.content.some(block => block.type === 'tool_result'))
         if (plain) openTurnStart = body.messages.slice(0, body.messages.indexOf(message)).filter(m => m.role === 'assistant').length
       })
-      row = { setting, thinkingType: body.thinking?.type, assistantMessages: assistants.length, openTurnStart, thinkingBlocks: thinking.reduce((a, b) => a + b, 0), thinkingMessageIndices: thinking.flatMap((count, index) => count ? [index] : []), contextKeep: body.context_management?.edits?.find(edit => edit.type === 'clear_thinking_20251015')?.keep }
+      row = { setting, model: typeof body.model === 'string' ? body.model : undefined, thinkingType: body.thinking?.type, assistantMessages: assistants.length, openTurnStart, thinkingBlocks: thinking.reduce((a, b) => a + b, 0), thinkingMessageIndices: thinking.flatMap((count, index) => count ? [index] : []), contextKeep: body.context_management?.edits?.find(edit => edit.type === 'clear_thinking_20251015')?.keep }
       upstream.push(row)
     }
     const headers = { ...request.headers }
@@ -59,6 +63,8 @@ const relay = createServer(async (request, response) => {
         try {
           const event = JSON.parse(line.slice(6))
           if (event.message?.usage) row.usage = { ...row.usage, ...event.message.usage }
+          // The model the provider actually served, not the one we asked for.
+          if (typeof event.message?.model === 'string') row.servedModel = event.message.model
           if (event.usage) row.usage = { ...row.usage, ...event.usage }
           if (event.error) row.errorType = event.error.type
         } catch { /* A non-SSE error body has no usage. */ }
@@ -90,7 +96,7 @@ try {
   })
   if (!proxy.server.listening) await once(proxy.server, 'listening')
   assert.notEqual(proxy.server.address().port, 3456)
-  report = { platform: process.platform, node: process.version, sdk: JSON.parse(await readFile(new URL('../node_modules/@anthropic-ai/claude-agent-sdk/package.json', import.meta.url))).version, cli: JSON.parse(await readFile(new URL('../node_modules/@anthropic-ai/claude-code/package.json', import.meta.url))).version, model: 'claude-opus-5-5', client: 'Pi-shaped HTTP', rows: [], upstream }
+  report = { platform: process.platform, node: process.version, sdk: JSON.parse(await readFile(new URL('../node_modules/@anthropic-ai/claude-agent-sdk/package.json', import.meta.url))).version, cli: JSON.parse(await readFile(new URL('../node_modules/@anthropic-ai/claude-code/package.json', import.meta.url))).version, model, client: 'Pi-shaped HTTP', rows: [], upstream }
   const tool = { name: 'read', description: 'Read the outcome of the specified weighing.', input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }
   for (setting of ['off', 'on']) {
     process.env.MERIDIAN_DROP_PRIOR_THINKING = setting === 'on' ? '1' : '0'
@@ -106,7 +112,7 @@ try {
       })
       assert.equal(result.status, 200)
       const content = []
-      let usage = {}, stopReason, thinkingDeltas = 0, signatureDeltas = 0
+      let usage = {}, stopReason, servedModel, thinkingDeltas = 0, signatureDeltas = 0
       const text = await result.text()
       for (const line of text.split('\n')) {
         if (!line.startsWith('data: ')) continue
@@ -116,7 +122,10 @@ try {
           console.error(JSON.stringify({ clientErrorType: report.errorType }))
         }
         assert.notEqual(event.type, 'error')
-        if (event.type === 'message_start') usage = { ...usage, ...event.message.usage }
+        if (event.type === 'message_start') {
+          usage = { ...usage, ...event.message.usage }
+          if (typeof event.message.model === 'string') servedModel = event.message.model
+        }
         if (event.type === 'message_delta') { usage = { ...usage, ...event.usage }; stopReason = event.delta.stop_reason }
         if (event.type === 'content_block_start') content[event.index] = { ...event.content_block }
         if (event.type === 'content_block_delta') {
@@ -130,7 +139,7 @@ try {
       assert(stopReason)
       for (const block of content) if (block.type === 'tool_use') { block.input = JSON.parse(block.partial || '{}'); delete block.partial }
       const visibleChars = content.reduce((sum, block) => sum + (block.thinking?.length || block.text?.length || (block.type === 'tool_use' ? JSON.stringify({ name: block.name, input: block.input }).length : 0)), 0)
-      const row = { setting, request: ++count, input: usage.input_tokens, cacheRead: usage.cache_read_input_tokens || 0, cacheWrite: usage.cache_creation_input_tokens || 0, output: usage.output_tokens, visibleTokensEstimate: Math.round(visibleChars / 4), signatureTokensEstimate: Math.round(content.reduce((sum, block) => sum + (block.signature?.length || 0), 0) / 4), thinkingDeltas, signatureDeltas, toolCalls: content.filter(block => block.type === 'tool_use').length, upstreamRequests: upstream.length - start }
+      const row = { setting, request: ++count, servedModel, input: usage.input_tokens, cacheRead: usage.cache_read_input_tokens || 0, cacheWrite: usage.cache_creation_input_tokens || 0, output: usage.output_tokens, visibleTokensEstimate: Math.round(visibleChars / 4), signatureTokensEstimate: Math.round(content.reduce((sum, block) => sum + (block.signature?.length || 0), 0) / 4), thinkingDeltas, signatureDeltas, toolCalls: content.filter(block => block.type === 'tool_use').length, upstreamRequests: upstream.length - start }
       row.billedUpstreamOutput = upstream.slice(start).reduce((sum, request) => sum + (request.usage?.output_tokens || 0), 0)
       row.prompt = row.input + row.cacheRead + row.cacheWrite
       const previous = report.rows.filter(entry => entry.setting === setting).at(-1)
@@ -144,9 +153,9 @@ try {
       for (const request of requests) {
         assert.equal(request.status, 200)
         if (count > 1) assert(request.assistantMessages > 0, 'History replayed instead of resumed')
-        // Only the newest assistant API message may carry thinking: earlier steps
-        // of the same open tool loop must arrive without it, and be accepted.
-        if (setting === 'on') assert(request.thinkingMessageIndices.every(index => index === request.assistantMessages - 1), 'Thinking older than the newest assistant message reached the API')
+        // Retained history is no longer pruned, regardless of the legacy flag.
+        // Prefix immutability is asserted by the offline e2e-cache-prefix.mjs;
+        // this live probe only records model acceptance and numeric cost data.
       }
       messages.push({ role: 'assistant', content })
       return content

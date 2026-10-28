@@ -7151,19 +7151,35 @@ sensitive-file cleanup if disk publication remains stuck after child exit.
 
 ```sh
 npm run build
-node scripts/e2e-prior-thinking.mjs
+E2E_MODEL=claude-fable-5-1 E2E_REPORT_PATH=/path/to/prior-thinking.json \
+  node scripts/e2e-prior-thinking.mjs
 ```
 
 Requires authenticated Claude Max credentials (default `~/.claude`, override
 `E2E_CLAUDE_CONFIG_DIR`). Uses a private disposable credential copy, config,
 workdir, SDK transcripts and ephemeral ports; never changes a running service.
-Optional `E2E_REPORT_PATH` writes only numeric/field-name JSON evidence. The
-harness drives Pi-shaped streaming HTTP with actual `claude-opus-5-5`, both
-flag settings, multi-turn answers and three sequential client tool calls. An
-in-memory upstream relay checks that, with the flag on, only the newest
-assistant message carries thinking; it
-never persists or prints prompts, transcripts or credentials. Finally closes
-owned listeners/SDK processes and deletes scratch state.
+`E2E_MODEL` selects the model under test and defaults to `claude-opus-5-5`.
+Optional `E2E_REPORT_PATH` writes only numeric/field-name JSON evidence; model
+names are recorded, but no prompt, transcript or credential is. Each request
+row carries the model forwarded upstream (`model`) and the model the provider
+actually served (`message_start.message.model`), so the requested model is
+never mistaken for the route that answered. The harness drives Pi-shaped
+streaming HTTP with both legacy flag settings, multi-turn answers and three
+sequential client tool calls.
+
+`MERIDIAN_DROP_PRIOR_THINKING` and `CLAUDE_PROXY_DROP_PRIOR_THINKING` are
+retired and ignored: both settings are accepted, and prior thinking is retained
+either way, so this probe no longer asserts that a flag removes it. It records
+live model acceptance of adaptive and budget thinking plus per-turn cache
+read/write numbers, and never persists or prints prompts, transcripts or
+credentials. Finally closes owned listeners/SDK processes and deletes scratch
+state.
+
+Prefix/checkpoint stability is **not** asserted here — the offline
+`scripts/e2e-cache-prefix.mjs` owns that assertion (see
+[cache-prefix stability](docs/maintenance/evidence/cache-prefix-stability.md)).
+This probe is a live acceptance and cost probe only; its cache numbers alone do
+not establish net savings or cost improvement.
 
 Linux evidence and limitations:
 [drop-prior-thinking](docs/maintenance/evidence/drop-prior-thinking.md).

@@ -83,7 +83,7 @@ async function send(app: ReturnType<typeof createProxyServer>["app"], messages: 
   expect(events.some(event => event.data.type === "content_block_delta" && (event.data.delta as { type?: string })?.type === "signature_delta")).toBe(true)
   return capturedOptions.sessionId!
 }
-describe("drop prior thinking at the mocked SDK boundary", () => {
+describe("cache-keyed thinking retention at the mocked SDK boundary", () => {
   for (const flag of ["MERIDIAN_DROP_PRIOR_THINKING", "CLAUDE_PROXY_DROP_PRIOR_THINKING", "off"]) {
     it(`${flag}: resumes, leaves source immutable and still streams thinking`, async () => {
       if (flag !== "off") process.env[flag] = "1"
@@ -98,13 +98,13 @@ describe("drop prior thinking at the mocked SDK boundary", () => {
       expect(capturedOptions.thinking).toEqual({ type: "adaptive" })
       expect(readFileSync(path(id), "utf8")).toBe(source)
       const rows = readFileSync(path(target), "utf8").trim().split("\n").map(line => JSON.parse(line))
-      expect(rows[0].message.content).toEqual(flag === "off" ? [thought, visible] : [visible])
-      expect(rows[1].message.content).toEqual(flag === "off" ? [thought, visible] : [visible])
+      expect(rows[0].message.content).toEqual([thought, visible])
+      expect(rows[1].message.content).toEqual([thought, visible])
       const third = [...second, { role: "assistant", content: [thought, visible] }, { role: "user", content: "third" }]
       const last = await send(app, third)
       expect(capturedOptions.resume).toBe(target)
       const finalRows = readFileSync(path(last), "utf8").trim().split("\n").map(line => JSON.parse(line))
-      expect(finalRows[0].message.content).toEqual(flag === "off" ? [thought, visible] : [visible])
+      expect(finalRows[0].message.content).toEqual([thought, visible])
     })
   }
   it("MERIDIAN false overrides the legacy opt-in", async () => {
@@ -129,12 +129,12 @@ describe("drop prior thinking at the mocked SDK boundary", () => {
     expect(body).toContain("fixture startup failure")
     expect(body).not.toContain("locate owned SDK transcript")
   })
-  it("prunes a durably completed target even when SDK throws after its canonical result", async () => {
+  it("preserves a durably completed target even when SDK throws after its canonical result", async () => {
     process.env.MERIDIAN_DROP_PRIOR_THINKING = "1"
     failure = "after-result"
     const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
     const id = await send(app, [{ role: "user", content: "first" }])
-    expect(JSON.parse(readFileSync(path(id), "utf8").split("\n")[0]!).message.content).toEqual([visible])
+    expect(JSON.parse(readFileSync(path(id), "utf8").split("\n")[0]!).message.content).toEqual([thought, visible])
   })
   it("fresh structured replay never reintroduces client-echoed thinking", async () => {
     process.env.MERIDIAN_DROP_PRIOR_THINKING = "1"

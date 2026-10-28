@@ -1,14 +1,12 @@
 /**
- * Prior-thinking pruning through the HTTP layer during a passthrough tool loop.
+ * Cache-keyed thinking retention through the HTTP layer during a passthrough tool loop.
  *
- * B1: the pending tool loop's thinking must survive pruning on every SDK attempt
- * path, including the four fresh-replay/model-fallback call sites, even though
- * the hidden digest assistant is written after the client-visible tool turn.
- * B2: a prune refusal must never replace an already-delivered turn, must leave
- * the transcript byte-identical, and must not poison the next resume.
+ * Completed steps and the pending tool call must survive each SDK attempt path,
+ * including fresh replay/model fallback. A hidden digest may be discarded by the
+ * existing checkpoint rewind, but Meridian must never rewrite the sent prefix.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test"
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Options, PreToolUseHookInput } from "@anthropic-ai/claude-agent-sdk"
@@ -19,7 +17,6 @@ import { blockStop, inputJsonDelta, messageDelta, messageStart, messageStop, par
 import { PASSTHROUGH_DENY_REASON } from "../proxy/passthroughDenial"
 import { setSessionStoreDir } from "../proxy/sessionStore"
 
-type Fault = "malformed_row" | "unparseable_line" | "truncated_tail" | "checkpoint_absent" | "transcript_not_found" | "not_regular_file" | "target_not_leased"
 type Refusal = "missing_message" | "extra_usage"
 
 let root: string
@@ -27,9 +24,8 @@ let storeDir: string
 let calls: Array<{ options: Options; prompt: unknown; sessionId?: string }> = []
 let logs: Array<{ event: string; data: Record<string, unknown> }> = []
 /** One entry per query(): what the SDK attempt does. */
-let script: Array<{ kind: "text" | "tool"; refuse?: Refusal; fault?: Fault }> = []
+let script: Array<{ kind: "text" | "tool"; refuse?: Refusal }> = []
 let seq = 0
-const written = new Map<string, string>()
 const thought = { type: "thinking", thinking: "loop thought", signature: "loop signature" }
 const READ_TOOL = { name: "read", description: "Read", input_schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } }
 
@@ -109,8 +105,7 @@ installSdkMock(() => ({
         emit(blockStop(0)); emit(toolUseBlockStart(1, "read", callId)); emit(inputJsonDelta(1, '{"path":"x"}')); emit(blockStop(1))
         emit(messageDelta("tool_use")); emit(messageStop())
       }
-      // checkpoint_absent: the checkpoint the iterator reports is not in the file.
-      const yielded = { ...a2, uuid: step.fault === "checkpoint_absent" ? uid("absent") : a2.uuid, message: { ...a2.message, type: "message", model: "claude-opus-5-5", stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 }, content: [thought, tool] }, parent_tool_use_id: null }
+      const yielded = { ...a2, uuid: a2.uuid, message: { ...a2.message, type: "message", model: "claude-opus-5-5", stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 }, content: [thought, tool] }, parent_tool_use_id: null }
       emit(yielded)
       events.push({ hook: {
         hook_event_name: "PreToolUse", session_id: sessionId, transcript_path: transcriptFile(options, sessionId), cwd: String(options.cwd),
@@ -121,18 +116,8 @@ installSdkMock(() => ({
     }
     mkdirSync(projectDirectory(options), { recursive: true })
     const path = transcriptFile(options, sessionId)
-    let body = prior + rows.map(row => JSON.stringify(row)).join("\n") + "\n"
-    if (step.fault === "malformed_row") body += JSON.stringify({ type: "assistant", uuid: uid("bad"), message: { content: [thought] } }) + "\n"
-    if (step.fault === "unparseable_line") body = "{broken\n" + body
-    if (step.fault === "truncated_tail") body += '{"type":"assistant","uuid":"cut'
-    written.set(sessionId, body)
-    if (step.fault === "not_regular_file") {
-      const real = join(root, `real-${sessionId}.jsonl`)
-      writeFileSync(real, body, { mode: 0o600 })
-      symlinkSync(real, path)
-    } else if (step.fault !== "transcript_not_found") {
-      writeFileSync(path, body, { mode: 0o600 })
-    }
+    const body = prior + rows.map(row => JSON.stringify(row)).join("\n") + "\n"
+    writeFileSync(path, body, { mode: 0o600 })
     for (const event of events) {
       if (isHookStep(event)) {
         if (preHook) await preHook(event.hook, undefined, { signal: new AbortController().signal })
@@ -140,9 +125,6 @@ installSdkMock(() => ({
       }
       yield event
     }
-    // target_not_leased: a locator-bookkeeping mismatch. The attempt's sessionId
-    // no longer names any leased locator when the prune gate runs.
-    if (step.fault === "target_not_leased") options.sessionId = crypto.randomUUID()
     yield { type: "result", subtype: "success", is_error: false, num_turns: 1, result: "", uuid: crypto.randomUUID(), session_id: sessionId,
       duration_ms: 1, duration_api_ms: 1, total_cost_usd: 0, usage: {}, modelUsage: {}, permission_denials: [] }
   })(),
@@ -169,7 +151,6 @@ beforeEach(() => {
   process.env.MERIDIAN_DROP_PRIOR_THINKING = "1"
   process.env.MERIDIAN_BUSY_RETRY_DELAY_MS = "5"
   calls = []
-  written.clear()
   logs = []
   script = []
   clearSessionCache()
@@ -214,17 +195,19 @@ function callIdOf(blocks: Array<Record<string, unknown>>): string {
   return (blocks.find(block => block.type === "tool_use") as { id: string }).id
 }
 function lastCall() { return calls.at(-1)! }
-function expectLoopThinkingKept(sessionId: string) {
+function expectHistoryThinkingKept(sessionId: string) {
   const rows = rowsOf(lastCall().options, sessionId)
   const toolGroup = rows.filter(row => row.type === "assistant" && String(row.message.id).startsWith("msg_tool_"))
   const digest = rows.filter(row => row.type === "assistant" && String(row.message.id).startsWith("msg_digest_"))
   const older = rows.filter(row => row.type === "assistant" && String(row.message.id).startsWith("msg_text_"))
   expect(toolGroup.flatMap(row => row.message.content).map((block: any) => block.type)).toEqual(["thinking", "tool_use"])
-  expect(digest.flatMap(row => row.message.content).map((block: any) => block.type)).toEqual(["text"])
-  for (const row of older) expect(row.message.content.some((block: any) => block.type === "thinking")).toBe(false)
+  expect(digest.flatMap(row => row.message.content).map((block: any) => block.type)).toEqual(["thinking", "text"])
+  for (const id of new Set(older.map(row => row.message.id))) {
+    expect(older.filter(row => row.message.id === id).flatMap(row => row.message.content).map((block: any) => block.type)).toEqual(["thinking", "text"])
+  }
 }
 
-describe("pending tool loop thinking survives pruning", () => {
+describe("tool loop history is never pruned", () => {
   for (const stream of [false, true]) {
     const mode = stream ? "stream" : "non_stream"
     it(`${mode}: wired resume path keeps the loop's thinking with the digest row last`, async () => {
@@ -234,17 +217,12 @@ describe("pending tool loop thinking survives pruning", () => {
       const blocks = await send(app, stream, next, `wired-${mode}`)
       const target = lastCall().options.sessionId!
       expect(lastCall().options.resume).toBeTruthy()
-      expectLoopThinkingKept(target)
+      expectHistoryThinkingKept(target)
       await send(app, stream, toolResultTurn(callIdOf(blocks)), `wired-${mode}`)
       expect(lastCall().options.resume).toBe(target)
       expect(lastCall().options.resumeSessionAt).toBeTruthy()
       expect(logs.filter(log => log.event === "session.prior_thinking_prune_failed")).toEqual([])
-      const pruned = logs.filter(log => log.event === "session.prior_thinking_pruned")
-      expect(pruned.length).toBe(3)
-      for (const log of pruned) {
-        expect(Object.keys(log.data).sort()).toEqual(["blocks", "bytesAfter", "bytesBefore", "messages", "mode"])
-        expect(log.data.mode).toBe(mode)
-      }
+      expect(logs.filter(log => log.event === "session.prior_thinking_pruned")).toEqual([])
     })
     for (const refuse of ["missing_message", "extra_usage"] as const) {
       const site = `${stream ? "stream" : "non_stream"}_fresh ${refuse === "missing_message" ? "resume-replay" : "model fallback"}`
@@ -260,55 +238,12 @@ describe("pending tool loop thinking survives pruning", () => {
         expect(calls.slice(1, -1).every(call => Boolean(call.options.resume))).toBe(true)
         expect(fresh.options.resume).toBeUndefined()
         const target = fresh.options.sessionId!
-        expectLoopThinkingKept(target)
+        expectHistoryThinkingKept(target)
         const callId = callIdOf(blocks)
-        expect(logs.some(log => log.event === "session.prior_thinking_pruned" && log.data.mode === `${mode}_fresh`)).toBe(true)
+        expect(logs.some(log => log.event === "session.prior_thinking_pruned")).toBe(false)
         await send(app, stream, toolResultTurn(callId), `site-${site}`)
         expect(lastCall().options.resume).toBe(target)
         expect(lastCall().options.resumeSessionAt).toBeTruthy()
-      })
-    }
-  }
-})
-
-describe("prune failures never fail a turn", () => {
-  const reasons: Record<Fault, string | undefined> = {
-    malformed_row: "malformed_row",
-    unparseable_line: "unparseable_line",
-    truncated_tail: undefined,
-    checkpoint_absent: "checkpoint_absent",
-    transcript_not_found: "transcript_not_found",
-    not_regular_file: "not_regular_file",
-    target_not_leased: "target_not_leased",
-  }
-  for (const stream of [false, true]) {
-    const mode = stream ? "stream" : "non_stream"
-    for (const [fault, reason] of Object.entries(reasons) as Array<[Fault, string | undefined]>) {
-      it(`${mode} ${fault}: delivers the turn, leaves the transcript untouched, and the next turn resumes`, async () => {
-        const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
-        script = [{ kind: "text" }, { kind: "tool", fault }, { kind: "text" }]
-        await send(app, stream, first, `fault-${mode}-${fault}`)
-        const blocks = await send(app, stream, next, `fault-${mode}-${fault}`)
-        expect(blocks.some(block => block.type === "tool_use")).toBe(true)
-        const target = calls[1]!.sessionId!
-        const failed = logs.filter(log => log.event === "session.prior_thinking_prune_failed")
-        if (reason) {
-          expect(failed).toEqual([{ event: "session.prior_thinking_prune_failed", data: { mode, reason } }])
-          if (fault !== "transcript_not_found") {
-            const raw = fault === "not_regular_file"
-              ? readFileSync(join(root, `real-${target}.jsonl`), "utf8")
-              : readFileSync(transcriptFile(calls[1]!.options, target), "utf8")
-            expect(raw).toBe(written.get(target)!)
-          }
-        } else {
-          expect(failed).toEqual([])
-          const raw = readFileSync(transcriptFile(calls[1]!.options, target), "utf8")
-          expect(raw.endsWith('{"type":"assistant","uuid":"cut')).toBe(true)
-          expectLoopThinkingKept(target)
-        }
-        const callId = callIdOf(blocks)
-        await send(app, stream, toolResultTurn(callId), `fault-${mode}-${fault}`)
-        expect(lastCall().options.resume).toBe(target)
       })
     }
   }

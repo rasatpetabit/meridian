@@ -1,5 +1,11 @@
 # Prior-thinking retention live evidence
 
+> Historical measurements of retired pruning behavior. The post-query transcript
+> rewrite has been removed; `MERIDIAN_DROP_PRIOR_THINKING` is now ignored. See
+> [cache-prefix stability](cache-prefix-stability.md) for the controlled offline
+> causal test. These earlier measurements do not establish net savings after
+> accounting for invalidated cache prefixes.
+
 Linux; Node v22.22.1; SDK 0.2.141; CLI 2.1.284; model `claude-opus-5-5`; Pi-shaped streaming HTTP.
 
 | Flag | Request | Input | Cache read | Cache write | Output | Prompt | Growth | Visible chars/4 | Thinking deltas | Tool calls |

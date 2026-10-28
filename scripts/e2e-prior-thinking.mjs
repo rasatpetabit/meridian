@@ -1,4 +1,5 @@
-// Opt-in: npm run build && node scripts/e2e-prior-thinking.mjs
+// Live opt-in cost probe (requires separate authorization): npm run build && node scripts/e2e-prior-thinking.mjs
+// DROP_PRIOR_THINKING is retired; both flag settings now preserve retained history.
 // Isolated state/auth copy, actual SDK + Opus 5.5, Pi-shaped streaming HTTP.
 // Only numeric/field-name evidence is emitted or persisted. No raw transcripts.
 import assert from 'node:assert/strict'
@@ -144,9 +145,9 @@ try {
       for (const request of requests) {
         assert.equal(request.status, 200)
         if (count > 1) assert(request.assistantMessages > 0, 'History replayed instead of resumed')
-        // Only the newest assistant API message may carry thinking: earlier steps
-        // of the same open tool loop must arrive without it, and be accepted.
-        if (setting === 'on') assert(request.thinkingMessageIndices.every(index => index === request.assistantMessages - 1), 'Thinking older than the newest assistant message reached the API')
+        // Retained history is no longer pruned, regardless of the legacy flag.
+        // Prefix immutability is asserted by the offline e2e-cache-prefix.mjs;
+        // this live probe only records model acceptance and numeric cost data.
       }
       messages.push({ role: 'assistant', content })
       return content

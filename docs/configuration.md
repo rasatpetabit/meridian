@@ -28,6 +28,7 @@ Environment variables, endpoints, authentication, SDK feature toggles, passthrou
 | `MERIDIAN_TELEMETRY_SIZE` | `CLAUDE_PROXY_TELEMETRY_SIZE` | `1000` | Telemetry ring buffer size, in rows. Pool routing writes one row **per account attempted**, so a request that failed over twice spends three. `/telemetry` reports what is actually held. |
 | `MERIDIAN_DIAGNOSTIC_LOG_SIZE` | `CLAUDE_PROXY_DIAGNOSTIC_LOG_SIZE` | `500` | Diagnostic log ring buffer size (the Logs tab and `GET /telemetry/logs`) |
 | `MERIDIAN_NO_FILE_CHANGES` | `CLAUDE_PROXY_NO_FILE_CHANGES` | unset | Disable "Files changed" summary in responses |
+| `MERIDIAN_DROP_PRIOR_THINKING` | `CLAUDE_PROXY_DROP_PRIOR_THINKING` | ignored | Deprecated: retained SDK thinking is no longer pruned because it can already be part of a written prompt-cache prefix. See [Prior thinking retention](#prior-thinking-retention). |
 | `MERIDIAN_STRIP_THINKING` | `CLAUDE_PROXY_STRIP_THINKING` | unset | Set to `1` to strip raw `<thinking>` tags from user-authored prompt text. Off by default — `<thinking>` is a common chain-of-thought convention in hand-written prompts (#720); enable only if your harness is observed leaking it verbatim. |
 | `MERIDIAN_SONNET_MODEL` | `CLAUDE_PROXY_SONNET_MODEL` | `sonnet` | Sonnet 4.x context tier: `sonnet` (200k, default) or `sonnet[1m]` (1M, requires Extra Usage†). No effect on Sonnet 5 and later (the default pin), which run with a native 1M window on every plan without Extra Usage. Not to be confused with `MERIDIAN_DEFAULT_SONNET_MODEL` below, which pins a concrete model id, not a context tier. |
 | `MERIDIAN_FABLE_MODEL` | `CLAUDE_PROXY_FABLE_MODEL` | `fable[1m]` | Fable context tier opt-out: set to `fable` to disable the 1M extended context window and stay on the 200k base variant (also governs Mythos, which rides the Fable tier). `fable[1m]` is a documented no-op. Not to be confused with `MERIDIAN_DEFAULT_FABLE_MODEL` below, which pins a concrete model id, not a context tier. |
@@ -131,6 +132,29 @@ not a reconstruction of the model actually served.
 
 See Anthropic's [overview](https://platform.claude.com/docs/en/models/haiku-5-5/overview)
 and [migration guide](https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide).
+
+### Prior thinking retention
+
+Meridian preserves thinking and opaque signatures in retained SDK transcripts.
+Completed tool steps can already have been sent as input on an earlier request;
+deleting their reasoning before the next resume rewrites that cache-keyed prefix.
+`MERIDIAN_DROP_PRIOR_THINKING` and its legacy alias
+`CLAUDE_PROXY_DROP_PRIOR_THINKING` are therefore deprecated and ignored, even
+when set to `1`. Thinking generation and client-visible streaming are unchanged.
+The `MERIDIAN_STRIP_THINKING` user-text sanitizer is unrelated.
+
+The SDK writer is still joined and its lifecycle lease released normally, but
+Meridian does not rewrite the transcript afterward. Existing reset, compaction,
+undo/checkpoint rewind and fresh replay paths retain their existing semantics.
+Fresh structured replay still omits client-echoed thinking; this change does not
+restore reasoning already removed from a retained branch.
+
+Keeping reasoning increases retained input/context size relative to pruning.
+Whether that costs more overall depends on cache reuse, model billing and context
+resets; no live savings are promised. See the [offline cache-prefix regression
+evidence](maintenance/evidence/cache-prefix-stability.md). The earlier
+[pruning measurements](maintenance/evidence/drop-prior-thinking.md) describe the
+retired behavior, not the current contract.
 
 ### Read-only credentials
 

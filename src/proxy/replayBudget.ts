@@ -44,14 +44,40 @@ export const REPLAY_RESERVE_TOKENS = 64_000
  *  English tokens, roughly half the window, for conversations that used to fit.
  *  Capping keeps the 1M budget byte-for-byte unchanged and lifts 200k models to
  *  the same ~80% share. Underestimates are still covered by the overflow retry. */
-export function replayReserveFor(model: string, resolvedModel?: string): number {
-  return Math.min(REPLAY_RESERVE_TOKENS, Math.floor(contextWindowFor(model, resolvedModel) * 0.1))
+export function replayReserveFor(
+  model: string,
+  resolvedModel?: string,
+  fallbackModel?: string,
+  resolvedFallbackModel?: string,
+): number {
+  return Math.min(REPLAY_RESERVE_TOKENS, Math.floor(replayWindowFor(model, resolvedModel, fallbackModel, resolvedFallbackModel) * 0.1))
 }
 
-export function replayBudgetFor(model: string, resolvedModel?: string): number {
+/** `fallbackModel` is the configured SDK fallback, which may answer in place
+ *  of the primary: the replay must fit the smaller of the two windows.
+ *  `resolvedModel` pins the primary's tier only; `resolvedFallbackModel` is the
+ *  fallback's own pin and defaults to `resolvedModel` only when both name the
+ *  same tier, so one tier's pin never sizes another's window. */
+export function replayBudgetFor(
+  model: string,
+  resolvedModel?: string,
+  fallbackModel?: string,
+  resolvedFallbackModel?: string,
+): number {
   const configured = replayBudgetOverride()
   if (configured !== undefined) return configured
-  return Math.floor(contextWindowFor(model, resolvedModel) * 0.9) - replayReserveFor(model, resolvedModel)
+  return Math.floor(replayWindowFor(model, resolvedModel, fallbackModel, resolvedFallbackModel) * 0.9)
+    - replayReserveFor(model, resolvedModel, fallbackModel, resolvedFallbackModel)
+}
+
+function replayWindowFor(
+  model: string,
+  resolvedModel?: string,
+  fallbackModel?: string,
+  resolvedFallbackModel = fallbackModel === model ? resolvedModel : undefined,
+): number {
+  const primary = contextWindowFor(model, resolvedModel)
+  return fallbackModel ? Math.min(primary, contextWindowFor(fallbackModel, resolvedFallbackModel)) : primary
 }
 
 /** Test-only override. Proving the trim against a real model otherwise needs a

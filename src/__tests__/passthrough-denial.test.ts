@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test"
 import {
   FORWARDED_BATCH_STOP_REASON,
   PASSTHROUGH_DENY_REASON,
+  PASSTHROUGH_HANDLED_REASON,
+  PASSTHROUGH_NOT_FORWARDED_REASON,
   isForwardedDenial,
+  isPassthroughHookBlock,
   stopAfterForwardedBatch,
 } from "../proxy/passthroughDenial"
 
@@ -51,5 +54,16 @@ describe("stopAfterForwardedBatch", () => {
     expect(await hook({})).toEqual({})
     expect(await hook({ tool_calls: "not-a-list" })).toEqual({})
     expect(await hook({ tool_calls: [null, { tool_use_id: 7 }] })).toEqual({})
+  })
+})
+
+describe("isPassthroughHookBlock", () => {
+  test("recognizes every synthetic hook block and no real result", () => {
+    for (const reason of [PASSTHROUGH_DENY_REASON, PASSTHROUGH_HANDLED_REASON, PASSTHROUGH_NOT_FORWARDED_REASON]) {
+      expect(isPassthroughHookBlock({ type: "tool_result", tool_use_id: "x", is_error: true, content: reason })).toBe(true)
+      expect(isPassthroughHookBlock({ type: "tool_result", tool_use_id: "x", content: reason })).toBe(false)
+    }
+    expect(isPassthroughHookBlock({ type: "tool_result", tool_use_id: "x", is_error: true, content: "ENOENT" })).toBe(false)
+    expect(isPassthroughHookBlock(undefined)).toBe(false)
   })
 })

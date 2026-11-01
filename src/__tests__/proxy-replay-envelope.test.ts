@@ -15,6 +15,7 @@ import { installMcpToolsMock } from "./mcpToolsMock"
 import { estimateTokens, replayBudgetFor } from "../proxy/replayBudget"
 import { resetExtendedContextUnavailable } from "../proxy/models"
 import * as models from "../proxy/models"
+import * as sdkFeatures from "../proxy/sdkFeatures"
 let capturedPrompts: any[] = []
 let overflowFailures = 0
 let overflowMessage = "Claude Code returned an error result: Prompt is too long"
@@ -103,7 +104,7 @@ function post(app: any, messages: any[], headers: Record<string, string> = {}, s
 }
 
 describe("bounded fresh replay", () => {
-  const envKeys = ["ANTHROPIC_DEFAULT_SONNET_MODEL", "MERIDIAN_DEFAULT_SONNET_MODEL", "MERIDIAN_REPLAY_BUDGET_TOKENS"]
+  const envKeys = ["ANTHROPIC_DEFAULT_SONNET_MODEL", "MERIDIAN_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "MERIDIAN_DEFAULT_HAIKU_MODEL", "MERIDIAN_REPLAY_BUDGET_TOKENS"]
   let savedEnv: Array<string | undefined> = []
   beforeEach(async () => {
     savedEnv = envKeys.map(key => process.env[key])
@@ -142,6 +143,42 @@ describe("bounded fresh replay", () => {
     expect(capturedPrompts[0]).toContain("were omitted from this replay")
     expect(capturedPrompts[0]).toContain("objective")
     expect(capturedPrompts[0]).toEndWith("live question")
+  })
+
+  // The SDK is handed the configured fallback model and may answer with it, so
+  // the replay is budgeted to the smaller window rather than the primary's.
+  // The fallback alias sizes through its own tier's pin: a legacy Haiku pin is
+  // 200k, while the default Haiku 5.5 has a native 1M window.
+  for (const fixture of [
+    { haikuPin: "claude-haiku-4-5", trimmed: true },
+    { haikuPin: undefined, trimmed: false },
+  ]) {
+    it(`budgets a 1M primary to a configured haiku fallback pinned to ${fixture.haikuPin ?? "the default"}`, async () => {
+      if (fixture.haikuPin) process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = fixture.haikuPin
+      const real = sdkFeatures.getFeaturesForAdapter
+      const features = spyOn(sdkFeatures, "getFeaturesForAdapter")
+        .mockImplementation(adapter => ({ ...real(adapter), fallbackModel: "haiku" }))
+      try {
+        const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
+        const res = await post(app, history(), {}, false, "claude-opus-5-5")
+        expect(res.status).toBe(200)
+        expect(capturedOptions[0].model).toBe("opus[1m]")
+        expect(capturedOptions[0].fallbackModel).toBe("haiku")
+        expect(String(capturedPrompts[0]).includes("were omitted from this replay")).toBe(fixture.trimmed)
+        expect(capturedPrompts[0]).toEndWith("live question")
+      } finally {
+        features.mockRestore()
+      }
+    })
+  }
+
+  it("keeps the 1M primary budget when no fallback model is configured", async () => {
+    const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
+    const res = await post(app, history(), {}, false, "claude-opus-5-5")
+    expect(res.status).toBe(200)
+    expect(capturedOptions[0].model).toBe("opus[1m]")
+    expect(capturedOptions[0].fallbackModel).toBeUndefined()
+    expect(capturedPrompts[0]).not.toContain("were omitted from this replay")
   })
 
   it("does not trim plain sonnet at 200k when it resolves to Sonnet 5+ (#1212)", async () => {

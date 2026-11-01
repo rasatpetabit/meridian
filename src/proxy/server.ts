@@ -93,7 +93,7 @@ export { runTransformHook, runObserveHook, buildPipeline, createRequestContext }
 import { claudeLog } from "../logger"
 import { replayBudgetFor, trimReplayHistory } from "./replayBudget"
 import { haikuThinkingCompatibilityError } from "./haikuCompatibility"
-import { PASSTHROUGH_DENY_REASON } from "./passthroughDenial"
+import { PASSTHROUGH_DENY_REASON, PASSTHROUGH_HANDLED_REASON, PASSTHROUGH_NOT_FORWARDED_REASON } from "./passthroughDenial"
 import { exec as execCallback } from "child_process"
 import { promisify } from "util"
 import { randomUUID } from "crypto"
@@ -1349,6 +1349,10 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
           throw new SessionLifecycleError("SDK writer could not be joined; transcript remains fenced")
         }
         if (activeTranscriptLease) {
+          // Resumed transcripts are provider input, not just response archives.
+          // Even completed tool steps may already be part of a written cache
+          // prefix. Never prune thinking after a query: the next fork must
+          // inherit the exact sent history until an explicit reset/replay.
           await releaseJoinedTranscriptLease(activeTranscriptLease, sessionGcOptions)
         }
       } finally {
@@ -3880,7 +3884,15 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
       const freshReplay = !isResume && !resumeSessionId
       // Client usage describes its resumed context, not the fresh transcript;
       // derive replay capacity from the actual SDK model's window instead.
-      const modelReplayBudget = () => replayBudgetFor(model, model === "sonnet" ? resolvedSonnetModel : resolvedHaikuModel())
+      // The configured SDK fallback may answer instead, so the replay must also
+      // fit its window; its alias resolves through its own tier's pin.
+      const fallbackModel = sdkFeatures.fallbackModel
+      const resolvedFallbackModel = fallbackModel === "sonnet" ? resolvedSonnetModel
+        : fallbackModel === "haiku" ? envOverrides?.ANTHROPIC_DEFAULT_HAIKU_MODEL ?? profileEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL
+        : undefined
+      const modelReplayBudget = () => replayBudgetFor(
+        model, model === "sonnet" ? resolvedSonnetModel : resolvedHaikuModel(), fallbackModel, resolvedFallbackModel,
+      )
       let currentReplayBudget = modelReplayBudget()
       let replayTrimRetries = 0
       let replayOmittedMessages = 0
@@ -4285,6 +4297,15 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
         }
       }
       const pendingDenyReleases: Array<() => void> = []
+      // Streaming SDK attempts own the capture state above (see
+      // runStreamSdkAttempt). Each attempt binds fresh passthrough PreToolUse
+      // callbacks to its own immutable token; only the token named here may
+      // touch request state. Host callbacks can outlive their SDK writer, so a
+      // callback from a retired attempt is answered NOT_FORWARDED before it
+      // can capture, mark priority exposure, abort or hold. Non-stream and
+      // silent-recovery queries use the unbound callbacks (no token).
+      type StreamAttemptToken = Readonly<{ mode: string }>
+      let activeStreamAttempt: StreamAttemptToken | undefined
       // True while a model turn is actively generating (message_start seen,
       // no message_delta/message_stop yet). Hooks dispatched AFTER generation
       // completes (the CLI runs tool dispatch semi-sequentially, so later
@@ -4467,11 +4488,23 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
             }],
           }
         : undefined
-      const sdkHooks = passthrough
+      const sdkHooksFor = (attemptToken?: StreamAttemptToken) => passthrough
         ? {
             PreToolUse: [{
               matcher: "",  // Match ALL tools
               hooks: [async (input: any) => {
+                // Attempt fence: a retired streaming attempt's callback must
+                // not mutate capture, discovery, priority or hold state, and
+                // must not promise the model a client result.
+                const attemptRetired = (): boolean =>
+                  attemptToken !== undefined && activeStreamAttempt !== attemptToken
+                if (attemptRetired()) {
+                  claudeLog("passthrough.retired_attempt_hook", { mode: attemptToken?.mode, phase: "entry" })
+                  return {
+                    decision: "block" as const,
+                    reason: PASSTHROUGH_NOT_FORWARDED_REASON,
+                  }
+                }
                 // Let the SDK handle ToolSearch internally for deferred tool loading.
                 // ToolSearch is filtered from the response stream below.
                 // Return {} — NOT undefined. SDK validates hook returns with Zod and
@@ -4622,23 +4655,26 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 // only delay until the timeout).
                 if (earlyStopEnabled && turnGenerating && !requestAbort.controller.signal.aborted) {
                   await holdDenyUntilTurnEnd()
+                  // Teardown retires the token before it releases this hold;
+                  // the attempt's captures died with it.
+                  if (attemptRetired()) {
+                    claudeLog("passthrough.retired_attempt_hook", { mode: attemptToken?.mode, phase: "held" })
+                    return {
+                      decision: "block" as const,
+                      reason: PASSTHROUGH_NOT_FORWARDED_REASON,
+                    }
+                  }
                 }
                 if (isExactDuplicate || isPostCheckpointCall) {
                   return {
                     decision: "block" as const,
-                    reason:
-                      "This tool call has already been handled by the client-facing turn — do not repeat it. " +
-                      "Do not call additional tools and do not generate further text — end your turn now.",
+                    reason: PASSTHROUGH_HANDLED_REASON,
                   }
                 }
                 if (isSameToolRepeat || exceedsForcedSingle) {
                   return {
                     decision: "block" as const,
-                    reason:
-                      "This tool call was NOT executed and was not forwarded. Your earlier tool call(s) " +
-                      "are being returned to the client now; their results arrive next turn. Re-issue this " +
-                      "call after that if it is still needed. Do not call additional tools and do not " +
-                      "generate further text — end your turn now.",
+                    reason: PASSTHROUGH_NOT_FORWARDED_REASON,
                   }
                 }
                 return {
@@ -4660,6 +4696,8 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               : {}),
             ...(fileChangeHook ? { PostToolUse: [fileChangeHook] } : {}),
           }
+      // Unbound callbacks: non-stream attempts and silent-turn recovery.
+      const sdkHooks = sdkHooksFor()
 
         // Capture subprocess stderr for all paths — used to surface the real
         // failure message when the Claude subprocess exits with a non-zero code.
@@ -6129,6 +6167,57 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               const MAX_RATE_LIMIT_RETRIES = 2
               const RATE_LIMIT_BASE_DELAY_MS = envInt("RATE_LIMIT_BASE_DELAY_MS", 1000)
 
+              // One primary streaming SDK attempt: the retry loop, the refused-
+              // resume fresh replay and the configured-model fallback each
+              // enter here exactly once per query. Silent-turn recovery is a
+              // separate post-delivery query with its own capture window
+              // (capturedBeforeRecovery) and is not a primary attempt.
+              //
+              // Attempt-owned state is reset on entry, so a retried attempt's
+              // capture, dedupe signatures, forwarded ids, checkpoint tracker
+              // and unstreamed metadata cannot become the next attempt's client
+              // tool call. Request-owned state is never touched here: the
+              // cached input resume anchor, prior history and sdkUuidMap
+              // prefix, retry budgets, abort controller, priority exposure, and
+              // anything already emitted. A transparent retry is admitted only
+              // when no raw stream event and no committed priority exposure
+              // exists, so there is no emitted output to rewind.
+              //
+              // Teardown retires the token synchronously before releasing the
+              // attempt's held denies, and before control reaches the retry
+              // loop's catch, backoff or token refresh.
+              const runStreamSdkAttempt = async function* (
+                mode: string,
+                buildAttempt: (attemptHooks: ReturnType<typeof sdkHooksFor>) => ReturnType<typeof buildQueryOptions>,
+              ) {
+                releaseHeldDenies(`${mode}_attempt_start`)
+                sawTurnBoundarySignal = false
+                capturedToolUses.length = 0
+                capturedSignatures.clear()
+                capturedToolNames.clear()
+                droppedToolUseIds.clear()
+                forwardedToolUseIds.clear()
+                sawDuplicateToolUse = false
+                earlyStop.expected.clear()
+                earlyStop.resolved.clear()
+                earlyStop.toolCallAssistantUuid = undefined
+                earlyStop.fired = false
+                earlyStopFired = false
+                unstreamedAssistants.length = 0
+                nextPassthroughToolCallAssistantUuid = undefined
+                nextPassthroughToolCallIds = undefined
+                sawCanonicalResult = false
+                const token: StreamAttemptToken = Object.freeze({ mode })
+                activeStreamAttempt = token
+                try {
+                  const attemptQuery = buildAttempt(sdkHooksFor(token))
+                  yield* runSdkQueryAttempt(attemptQuery, requestAbort.controller.signal, requestMeta, mode, managedSdkAttemptLocators())
+                } finally {
+                  if (activeStreamAttempt === token) activeStreamAttempt = undefined
+                  releaseHeldDenies(`${mode}_attempt_end`)
+                }
+              }
+
               const response = (async function* () {
                 let rateLimitRetries = 0
 
@@ -6167,25 +6256,27 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                   let attemptMaxTurns: number | undefined
                   try {
                     if (resumeSessionId) resumedMappingMayBeAdvanced = true
-                    const attemptQuery = buildQueryOptions({
-                      prompt: makePrompt(), model, workingDirectory, clientWorkingDirectory: promptClientWorkingDirectory, clientEnvironmentMayDifferFromProxy, systemContext, claudeExecutable,
-                      passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools, earlyStop: earlyStopEnabled, isForwardedToolUse, liftSingleTurnCap: singleTurnCapLifted,
-                      resumeSessionId, isUndo: sdkUndo, resumeSessionAtUuid: undoRollbackUuid ?? passthroughToolCallAssistantUuid, forkSession: busySessionFork || undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
-                      effort, thinking, taskBudget, outputFormat, betas, settingSources,
-                      codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
-                    memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
-                    webFetchPreflight: sdkFeatures.webFetchPreflight, transcriptRetentionDays,
-                    claudeAiConnectors: sdkFeatures.claudeAiConnectors,
-                      maxBudgetUsd: sdkFeatures.maxBudgetUsd, maxOutputTokens: clientMaxOutputTokens, fallbackModel: sdkFeatures.fallbackModel,
-                      sdkDebug: sdkFeatures.sdkDebug,
-                      additionalDirectories: sdkFeatures.additionalDirectories
-                        ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
-                        : undefined,
-                      advisorModel,
-                    }, requestAbort.controller)
-                    attemptMaxTurns = attemptQuery.options.maxTurns
-                    lastAttemptMaxTurns = attemptMaxTurns
-                    for await (const event of runSdkQueryAttempt(attemptQuery, requestAbort.controller.signal, requestMeta, "stream", managedSdkAttemptLocators())) {
+                    for await (const event of runStreamSdkAttempt("stream", (attemptHooks) => {
+                      const attemptQuery = buildQueryOptions({
+                        prompt: makePrompt(), model, workingDirectory, clientWorkingDirectory: promptClientWorkingDirectory, clientEnvironmentMayDifferFromProxy, systemContext, claudeExecutable,
+                        passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools, earlyStop: earlyStopEnabled, isForwardedToolUse, liftSingleTurnCap: singleTurnCapLifted,
+                        resumeSessionId, isUndo: sdkUndo, resumeSessionAtUuid: undoRollbackUuid ?? passthroughToolCallAssistantUuid, forkSession: busySessionFork || undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks: attemptHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
+                        effort, thinking, taskBudget, outputFormat, betas, settingSources,
+                        codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
+                      memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
+                      webFetchPreflight: sdkFeatures.webFetchPreflight, transcriptRetentionDays,
+                      claudeAiConnectors: sdkFeatures.claudeAiConnectors,
+                        maxBudgetUsd: sdkFeatures.maxBudgetUsd, maxOutputTokens: clientMaxOutputTokens, fallbackModel: sdkFeatures.fallbackModel,
+                        sdkDebug: sdkFeatures.sdkDebug,
+                        additionalDirectories: sdkFeatures.additionalDirectories
+                          ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
+                          : undefined,
+                        advisorModel,
+                      }, requestAbort.controller)
+                      attemptMaxTurns = attemptQuery.options.maxTurns
+                      lastAttemptMaxTurns = attemptMaxTurns
+                      return attemptQuery
+                    })) {
                       // Same SDK rate-limit capture as the non-stream path.
                       if ((event as any).type === "rate_limit_event") {
                         rateLimitStore.record(profile.id, (event as any).rate_limit_info)
@@ -6254,11 +6345,11 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                       currentSessionId = managedForkTarget?.sessionId
                       sdkUuidMap.length = 0
                       for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
-                      yield* runSdkQueryAttempt(buildQueryOptions({
+                      yield* runStreamSdkAttempt("stream_fresh", (attemptHooks) => buildQueryOptions({
                         prompt: buildFreshPrompt(executionMessages, sanitizeOpts, renderReplayToolName, modelReplayBudget(), "stream_resume_replay"),
                         model, workingDirectory, clientWorkingDirectory: promptClientWorkingDirectory, clientEnvironmentMayDifferFromProxy, systemContext, claudeExecutable,
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools, earlyStop: earlyStopEnabled, isForwardedToolUse,
-                        resumeSessionId: undefined, isUndo: false, resumeSessionAtUuid: undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
+                        resumeSessionId: undefined, isUndo: false, resumeSessionAtUuid: undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks: attemptHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                         effort, thinking, taskBudget, outputFormat, betas, settingSources,
                         codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
@@ -6270,7 +6361,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                           ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                           : undefined,
                         advisorModel,
-                      }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "stream_fresh", managedSdkAttemptLocators())
+                      }, requestAbort.controller))
                       return
                     }
 
@@ -6311,11 +6402,11 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                       currentSessionId = managedForkTarget?.sessionId
                       sdkUuidMap.length = 0
                       for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
-                      yield* runSdkQueryAttempt(buildQueryOptions({
+                      yield* runStreamSdkAttempt("stream_fresh", (attemptHooks) => buildQueryOptions({
                         prompt: buildFreshPrompt(executionMessages, sanitizeOpts, renderReplayToolName, modelReplayBudget(), "stream_model_fallback"),
                         model, workingDirectory, clientWorkingDirectory: promptClientWorkingDirectory, clientEnvironmentMayDifferFromProxy, systemContext, claudeExecutable,
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools, earlyStop: earlyStopEnabled, isForwardedToolUse,
-                        resumeSessionId: undefined, isUndo: false, resumeSessionAtUuid: undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
+                        resumeSessionId: undefined, isUndo: false, resumeSessionAtUuid: undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks: attemptHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                         effort, thinking, taskBudget, outputFormat, betas, settingSources,
                         codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                         memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
@@ -6327,7 +6418,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                           ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                           : undefined,
                         advisorModel,
-                      }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "stream_fresh", managedSdkAttemptLocators())
+                      }, requestAbort.controller))
                       return
                     }
 

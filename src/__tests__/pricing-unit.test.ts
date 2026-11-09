@@ -62,6 +62,19 @@ describe("resolveModelPricing", () => {
     })
     expect(resolveModelPricing("claude-opus-5")?.inputPerMTok).toBe(5)
   })
+
+  it("prices Fable 5.2 including its reduced cache-read rate", () => {
+    const expected = {
+      inputPerMTok: 8,
+      outputPerMTok: 40,
+      cacheReadPerMTok: 0.2,
+      cacheWritePerMTok: 10,
+    }
+    expect(resolveModelPricing("claude-fable-5-2")).toEqual(expected)
+    expect(resolveModelPricing("claude-fable-5-2[1m]")).toEqual(expected)
+    expect(resolveModelPricing("claude-fable-5-2-20261101")).toEqual(expected)
+    expect(resolveModelPricing("anthropic.claude-fable-5-2")).toEqual(expected)
+  })
   it("resolves SDK aliases meridian uses", () => {
     expect(resolveModelPricing("opus")).toMatchObject({ inputPerMTok: 4, outputPerMTok: 20 })
     expect(resolveModelPricing("sonnet")).toMatchObject({ inputPerMTok: 2, outputPerMTok: 10 })
@@ -78,6 +91,7 @@ describe("resolveModelPricing", () => {
   it("resolves concrete API model IDs", () => {
     expect(resolveModelPricing("claude-opus-4-8")).toMatchObject({ inputPerMTok: 5, outputPerMTok: 25 })
     expect(resolveModelPricing("claude-sonnet-4-6")).toMatchObject({ inputPerMTok: 3 })
+    expect(resolveModelPricing("claude-fable-5-2")).toMatchObject({ inputPerMTok: 8, outputPerMTok: 40 })
     expect(resolveModelPricing("claude-fable-5-1")).toMatchObject({ inputPerMTok: 10 })
     expect(resolveModelPricing("claude-fable-5")).toMatchObject({ inputPerMTok: 10 })
     expect(resolveModelPricing("claude-mythos-5-1")).toMatchObject({ inputPerMTok: 10 })
@@ -164,6 +178,19 @@ describe("estimateRequestCostUsd", () => {
       expect(estimateRequestCostUsd(metric, resolved)).toBeCloseTo(expected, 10)
       expect(resolved).toEqual(override)
     }
+  })
+
+  it("computes cost for Fable 5.2 with custom cache read rate and no context surcharge", () => {
+    const pricing = resolveModelPricing("claude-fable-5-2")!
+    const metric = makeMetric({
+      requestModel: "claude-fable-5-2",
+      inputTokens: 1_000_000,
+      outputTokens: 100_000,
+      cacheReadInputTokens: 500_000,
+      cacheCreationInputTokens: 200_000,
+    })
+    expect(estimateRequestCostUsd(metric, pricing)).toBeCloseTo(14.1, 10)
+    expect(pricing.contextTiers).toBeUndefined()
   })
 
   it("computes cost from all four token buckets", () => {

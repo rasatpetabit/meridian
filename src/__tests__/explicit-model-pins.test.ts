@@ -34,6 +34,8 @@ describe("explicitModelPin (#631)", () => {
 
   it("routes mythos ids through the fable tier pin", () => {
     expect(explicitModelPin("claude-mythos-5")).toEqual({ ANTHROPIC_DEFAULT_FABLE_MODEL: "claude-mythos-5" })
+    expect(explicitModelPin("claude-fable-5-2")).toEqual({ ANTHROPIC_DEFAULT_FABLE_MODEL: "claude-fable-5-2" })
+    expect(explicitModelPin("claude-fable-5-2[1m]")).toEqual({ ANTHROPIC_DEFAULT_FABLE_MODEL: "claude-fable-5-2" })
     expect(explicitModelPin("claude-fable-5-1")).toEqual({ ANTHROPIC_DEFAULT_FABLE_MODEL: "claude-fable-5-1" })
     expect(explicitModelPin("claude-fable-5")).toEqual({ ANTHROPIC_DEFAULT_FABLE_MODEL: "claude-fable-5" })
   })
@@ -161,5 +163,26 @@ describe("explicit model pins reach the subprocess env (#631)", () => {
     const res = await post(app, "opus")
     expect(res.status).toBe(200)
     expect(queryEnvs[0]!.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-5-5")
+  })
+
+  it("claude-fable-5-2 pins the fable tier for the request", async () => {
+    const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
+    const res = await post(app, "claude-fable-5-2")
+    expect(res.status).toBe(200)
+    expect(queryEnvs[0]!.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe("claude-fable-5-2")
+  })
+
+  it("claude-fable-5-2[1m] pins the fable tier for the request", async () => {
+    const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
+    const res = await post(app, "claude-fable-5-2[1m]")
+    expect(res.status).toBe(200)
+    expect(queryEnvs[0]!.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe("claude-fable-5-2")
+  })
+
+  it("bare fable resolves via the canonical pin (Fable 5.1)", async () => {
+    const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
+    const res = await post(app, "fable")
+    expect(res.status).toBe(200)
+    expect(queryEnvs[0]!.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe("claude-fable-5-1")
   })
 })

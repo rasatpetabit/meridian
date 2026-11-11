@@ -1693,9 +1693,24 @@ describe("buildModelList", () => {
     }
   })
 
-  it("returns 13 models", () => {
-    expect(buildModelList(true).length).toBe(13)
-    expect(buildModelList(false).length).toBe(13)
+  it("advertises Mythos 5.2 right after Fable 5.2 with the same window and adaptive-only thinking", () => {
+    for (const extended of [true, false]) {
+      const ids = buildModelList(extended).map(m => m.id)
+      expect(ids.indexOf("claude-mythos-5-2")).toBe(ids.indexOf("claude-fable-5-2") + 1)
+      const model = buildModelList(extended).find(m => m.id === "claude-mythos-5-2")!
+      expect(model).toBeDefined()
+      expect(model.display_name).toBe("Claude Mythos 5.2")
+      expect(model.context_window).toBe(1_000_000)
+      expect(model.capabilities?.thinking).toEqual({
+        supported: true,
+        types: { adaptive: { supported: true }, enabled: { supported: false } },
+      })
+    }
+  })
+
+  it("returns 14 models", () => {
+    expect(buildModelList(true).length).toBe(14)
+    expect(buildModelList(false).length).toBe(14)
   })
 
   it("includes current and legacy Fable plus the supported Sonnet and Opus models for UI pickers", () => {
@@ -1703,6 +1718,7 @@ describe("buildModelList", () => {
     expect(ids).toContain("claude-sonnet-5-5")
     expect(ids).toContain("claude-sonnet-5")
     expect(ids).toContain("claude-fable-5-2")
+    expect(ids).toContain("claude-mythos-5-2")
     expect(ids).toContain("claude-fable-5-1")
     expect(ids).toContain("claude-fable-5")
     expect(ids).toContain("claude-opus-5-5")
@@ -1713,7 +1729,7 @@ describe("buildModelList", () => {
   })
 
   it("every subscription gets the native 1M window for all Fable versions", () => {
-    for (const id of ["claude-fable-5-2", "claude-fable-5-1", "claude-fable-5"]) {
+    for (const id of ["claude-fable-5-2", "claude-mythos-5-2", "claude-fable-5-1", "claude-fable-5"]) {
       const fableMax = buildModelList(true).find(m => m.id === id)!
       const fableFree = buildModelList(false).find(m => m.id === id)!
       expect(fableMax.context_window).toBe(1_000_000)

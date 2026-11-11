@@ -21,6 +21,16 @@ export const STORED_CATALOG_TTL_MS = 7 * 24 * 60 * 60 * 1_000
 
 const UNKNOWN_MAX_TOKENS = 8_192
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+const FABLE_5_2_COST = { input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10 }
+const FABLE_5_2_MAX_TOKENS = 128_000
+const FABLE_5_2_COMPAT_FALLBACK: AnthropicCompat = {
+  forceAdaptiveThinking: true,
+  supportsTemperature: false,
+  supportsMidConvoEffort: true,
+  supportsMidConvoSystemMessages: true,
+  supportsStrictTools: true,
+}
+const FABLE_5_2_METADATA_IDS = new Set(["claude-fable-5-2", "claude-mythos-5-2"])
 // Mirrors VALID_EFFORTS in src/proxy/effort.ts; a test asserts the two stay identical.
 export const MERIDIAN_PI_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const
 
@@ -56,6 +66,8 @@ export const BUILTIN_CATALOG: readonly CatalogModel[] = [
   { id: "claude-opus-4-6", name: "Claude Opus 4.6", contextWindow: 200_000, ...ADAPTIVE_AND_ENABLED },
   { id: "claude-opus-4-7", name: "Claude Opus 4.7", contextWindow: 1_000_000, ...ADAPTIVE_AND_ENABLED },
   { id: "claude-opus-4-8", name: "Claude Opus 4.8", contextWindow: 1_000_000, ...ADAPTIVE_AND_ENABLED },
+  { id: "claude-fable-5-2", name: "Claude Fable 5.2", contextWindow: 1_000_000, ...ADAPTIVE_ONLY },
+  { id: "claude-mythos-5-2", name: "Claude Mythos 5.2", contextWindow: 1_000_000, ...ADAPTIVE_ONLY },
   { id: "claude-fable-5-1", name: "Claude Fable 5.1", contextWindow: 1_000_000, ...ADAPTIVE_AND_ENABLED },
   { id: "claude-fable-5", name: "Claude Fable 5", contextWindow: 1_000_000, ...ADAPTIVE_AND_ENABLED },
   { id: "claude-haiku-5-5", name: "Claude Haiku 5.5", contextWindow: 1_000_000, ...ADAPTIVE_ONLY },
@@ -167,19 +179,25 @@ export function buildModels(
   for (const model of anthropicModels) if (isAnthropicModel(model)) known.set(model.id, model)
 
   return catalog.map((entry) => {
-    const builtIn = known.get(entry.id)
-    const reasoning = entry.thinking ?? builtIn?.reasoning ?? false
+    // Pi's built-in anthropic provider carries no Mythos ids, and older Pi
+    // catalogs (< 1.5.1, including Meridian's pinned 1.3.0 devDependency)
+    // carry Fable 5 / 5.1 but not 5.2. Fall back to the matching Fable entry
+    // first, and supply explicit official 5.2 metadata when Pi lacks both.
+    const builtIn = known.get(entry.id) ?? known.get(entry.id.replace(/^claude-mythos-/, "claude-fable-"))
+    const isFable52Generation = FABLE_5_2_METADATA_IDS.has(entry.id)
+    const reasoning = entry.thinking ?? builtIn?.reasoning ?? isFable52Generation
     let thinkingLevelMap: ThinkingLevelMap | undefined = builtIn?.thinkingLevelMap
+      ?? (isFable52Generation ? { off: null, xhigh: "xhigh", max: "max" } : undefined)
     if (reasoning && entry.efforts) {
       const efforts = new Set(entry.efforts)
-      thinkingLevelMap = { off: entry.enabledThinking === false ? null : builtIn?.thinkingLevelMap?.off }
+      thinkingLevelMap = { off: entry.enabledThinking === false ? null : thinkingLevelMap?.off }
       for (const level of MERIDIAN_PI_EFFORTS) thinkingLevelMap[level] = efforts.has(level) ? level : null
       thinkingLevelMap.minimal = thinkingLevelMap.low
     }
     // Claude Code owns tool registration on Meridian's backend, so tools that
     // appear mid-conversation must arrive in the request-level tool list.
     const compat: AnthropicCompat = {
-      ...builtIn?.compat,
+      ...(builtIn?.compat ?? (isFable52Generation ? FABLE_5_2_COMPAT_FALLBACK : undefined)),
       supportsMidConvoToolChanges: false,
     }
     if (entry.adaptiveThinking !== undefined) compat.forceAdaptiveThinking = entry.adaptiveThinking
@@ -192,11 +210,11 @@ export function buildModels(
       reasoning,
       thinkingLevelMap,
       input: entry.imageInput === undefined
-        ? [...(builtIn?.input ?? ["text"])]
+        ? [...(builtIn?.input ?? (isFable52Generation ? ["text", "image"] : ["text"]))]
         : entry.imageInput ? ["text", "image"] : ["text"],
-      cost: builtIn?.cost ?? ZERO_COST,
+      cost: builtIn?.cost ?? (isFable52Generation ? FABLE_5_2_COST : ZERO_COST),
       contextWindow: entry.contextWindow,
-      maxTokens: builtIn?.maxTokens ?? Math.min(UNKNOWN_MAX_TOKENS, entry.contextWindow),
+      maxTokens: builtIn?.maxTokens ?? (isFable52Generation ? Math.min(FABLE_5_2_MAX_TOKENS, entry.contextWindow) : Math.min(UNKNOWN_MAX_TOKENS, entry.contextWindow)),
       compat,
     }
   })

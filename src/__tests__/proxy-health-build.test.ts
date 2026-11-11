@@ -140,6 +140,7 @@ describe("/v1/models profile auth context", () => {
     }])
     expect(models.get("claude-opus-4-6")?.context_window).toBe(1_000_000)
     expect(models.get("claude-fable-5-2")?.context_window).toBe(1_000_000)
+    expect(models.get("claude-mythos-5-2")?.context_window).toBe(1_000_000)
     expect(models.get("claude-fable-5-1")?.context_window).toBe(1_000_000)
     expect(models.get("claude-fable-5")?.context_window).toBe(1_000_000)
     expect(models.get("claude-sonnet-5-5")?.context_window).toBe(1_000_000)
@@ -170,6 +171,7 @@ describe("/v1/models profile auth context", () => {
       "claude-opus-4-7",
       "claude-opus-4-8",
       "claude-fable-5-2",
+      "claude-mythos-5-2",
       "claude-fable-5",
       "claude-fable-5-1",
       "claude-haiku-5-5",

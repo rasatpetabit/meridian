@@ -97,16 +97,20 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   (Mythos follows Fable). Values are normalized; an unrecognized value warns
   once and keeps the default, because with Extra Usage enabled a silent 1M
   choice is silently billed. A generic multi-tier switch was rejected.
-- **Claude Fable 5.2 catalog and pricing.** Advertised with official 1M context
-  and always-on adaptive thinking (`thinking.types.adaptive` supported,
-  `enabled` false), matching the official model overview
+- **Claude Fable 5.2 and Mythos 5.2 catalog and pricing.** Advertised with
+  official 1M context and always-on adaptive thinking
+  (`thinking.types.adaptive` supported, `enabled` false), matching the
+  official model overview
   (https://platform.claude.com/docs/en/models/overview,
-  https://www.anthropic.com/claude-fable-and-mythos-5-2). Routes through the
-  existing Fable tier alias (`fable[1m]`) with per-request model pinning to
-  `claude-fable-5-2`, preserving canonical `claude-fable-5-1` as the bare
-  alias default. Telemetry prices 5.2 at official rates: $8/M input, $40/M
-  output, $0.20/M cache read, $10/M 5-min cache write
-  (https://platform.claude.com/docs/en/about-claude/pricing).
+  https://www.anthropic.com/claude-fable-and-mythos-5-2). Both route through
+  the existing Fable tier alias (`fable[1m]`) with per-request model pinning
+  to the requested `claude-fable-5-2` / `claude-mythos-5-2` id, preserving
+  canonical `claude-fable-5-1` as the bare alias default; Mythos has no
+  separate SDK alias and shares the Fable tier like earlier Mythos
+  generations. Telemetry prices both 5.2 models at identical official rates:
+  $8/M input, $40/M output, $0.20/M cache read, $10/M 5-min cache write
+  (https://platform.claude.com/docs/en/about-claude/pricing); historical
+  Fable/Mythos generations keep their FABLE rates.
 - **Passthrough tool sets are shared by content, never by lifetime.** Sessions
   sending identical tools share one built definition set (#1410) and one raw
   tool list (#1444), found through process-wide indexes keyed by a digest of

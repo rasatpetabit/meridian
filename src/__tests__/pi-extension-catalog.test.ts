@@ -131,6 +131,40 @@ describe("Pi extension model definitions", () => {
     expect(model!.cost).toEqual(known.cost)
   })
 
+  test("falls back to the matching Fable metadata and explicit 5.2 rates when Pi lacks 5.2", () => {
+    // Pi 1.3.0's anthropic.json carries neither Mythos ids nor Fable 5.2;
+    // both 5.2 entries must still get 128k output, official $8/$40/$0.20/$10
+    // pricing, image input, and adaptive-only compatibility metadata.
+    const [mythos52, fable52] = buildModels([
+      { id: "claude-mythos-5-2", name: "Mythos 5.2", contextWindow: 1_000_000 },
+      { id: "claude-fable-5-2", name: "Fable 5.2", contextWindow: 1_000_000 },
+    ], anthropicModels, BASE)
+    expect(fable52!.maxTokens).toBe(128_000)
+    expect(fable52!.cost).toEqual({ input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10 })
+    expect(fable52!.reasoning).toBe(true)
+    expect(fable52!.input).toEqual(["text", "image"])
+    expect(fable52!.compat).toMatchObject({
+      forceAdaptiveThinking: true,
+      supportsTemperature: false,
+      supportsMidConvoToolChanges: false,
+    })
+    expect(mythos52!.maxTokens).toBe(128_000)
+    expect(mythos52!.cost).toEqual(fable52!.cost)
+    expect(mythos52!.compat).toEqual(fable52!.compat)
+
+    // The generations Pi does know are inherited concretely.
+    const [mythos51, mythos5] = buildModels([
+      { id: "claude-mythos-5-1", name: "Mythos 5.1", contextWindow: 1_000_000 },
+      { id: "claude-mythos-5", name: "Mythos 5", contextWindow: 1_000_000 },
+    ], anthropicModels, BASE)
+    const fable51 = anthropicModels.find(model => model.id === "claude-fable-5-1")!
+    const fable5 = anthropicModels.find(model => model.id === "claude-fable-5")!
+    expect(mythos51!.maxTokens).toBe(fable51.maxTokens)
+    expect(mythos51!.cost).toEqual(fable51.cost)
+    expect(mythos5!.maxTokens).toBe(fable5.maxTokens)
+    expect(mythos5!.cost).toEqual(fable5.cost)
+  })
+
   test("gives an unknown model a conservative output limit and zero cost", () => {
     const [large, small] = buildModels([
       { id: "claude-future", name: "Future", contextWindow: 500_000 },

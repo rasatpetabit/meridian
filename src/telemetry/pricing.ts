@@ -96,8 +96,10 @@ function rates(inputPerMTok: number, outputPerMTok: number): ModelPricing {
 }
 
 const FABLE = rates(10, 50)
-// Fable 5.2 pricing (platform.claude.com/docs/en/about-claude/pricing):
-// $8/M input, $40/M output, $0.20/M cache read, $10/M 5-min cache write.
+// Fable 5.2 and Mythos 5.2 pricing, identical per generation
+// (platform.claude.com/docs/en/about-claude/pricing): $8/M input, $40/M
+// output, $0.20/M cache read, $10/M 5-min cache write. Historical Fable and
+// Mythos generations stay at FABLE rates.
 const FABLE_52: ModelPricing = { ...rates(8, 40), cacheReadPerMTok: 0.2 }
 const OPUS = rates(5, 25) // Opus 4.5 through 5
 // Opus 5.5 cache reads are 5% of input (official model specs, 2026-09-22).
@@ -130,6 +132,7 @@ const HAIKU_3 = rates(0.25, 1.25)
 export const BUILTIN_MODEL_PRICING: Record<string, ModelPricing> = {
   fable: FABLE,
   "claude-fable-5-2": FABLE_52,
+  "claude-mythos-5-2": FABLE_52,
   "claude-fable-5-1": FABLE,
   "claude-fable-5": FABLE,
   "claude-mythos-5-1": FABLE,
@@ -195,7 +198,7 @@ export function resolveModelPricing(
   }
 
   if (normalized.includes("fable") || normalized.includes("mythos")) {
-    if (/^(?:anthropic\.)?claude-fable-5-2(?:-\d{8})?$/.test(normalized)) return FABLE_52
+    if (/^(?:anthropic\.)?claude-(?:fable|mythos)-5-2(?:-\d{8})?$/.test(normalized)) return FABLE_52
     return FABLE
   }
   if (normalized.includes("haiku")) {

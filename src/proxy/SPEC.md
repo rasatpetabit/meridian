@@ -74,21 +74,43 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   history block (full history every turn would otherwise read as undo or
   divergence); clients with a recognized session key keep real history so
   lineage can resume.
+  - Content parts map to Claude blocks: `text` and assistant `refusal` to
+    text, data-URL `image_url` to image, a base64 PDF data URL in `file` to
+    document, through the same `parseDataUrlImage` / `parseDataUrlPdf` the
+    Responses adapter uses. In user, assistant and tool messages a part that
+    cannot be delivered (remote image URL, `file_id`, another file type,
+    `input_audio`, an unknown type) becomes a bracketed omission note, never a
+    silent drop (#1482): a dropped part let the request succeed while Claude
+    never saw the input and nothing said so. System messages are flattened to
+    text. Packed history renders an earlier turn's images and documents as
+    `[Image attached]` / `[Document attached]`, so unkeyed, only the latest
+    turn's media reaches the model (media nested in a packed tool result is
+    still dropped).
+- **Explicit Claude versions disable refusal model switching.** The existing
+  per-request family pin also sets `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`
+  for recognized versioned Claude IDs. Native refusal fallback can otherwise
+  change the model after initial alias resolution. Bare aliases keep their
+  inherited behavior. Refusals and same-model refusal retries are unchanged;
+  an independently configured SDK `fallbackModel` remains outside this switch.
 - **Per-model 1M override.** `[1m]` stays the default for Opus and Fable;
   `MERIDIAN_OPUS_MODEL=opus` / `MERIDIAN_FABLE_MODEL=fable` opt a tier out
   (Mythos follows Fable). Values are normalized; an unrecognized value warns
   once and keeps the default, because with Extra Usage enabled a silent 1M
   choice is silently billed. A generic multi-tier switch was rejected.
-- **Claude Fable 5.2 catalog and pricing.** Advertised with official 1M context
-  and always-on adaptive thinking (`thinking.types.adaptive` supported,
-  `enabled` false), matching the official model overview
+- **Claude Fable 5.2 and Mythos 5.2 catalog and pricing.** Advertised with
+  official 1M context and always-on adaptive thinking
+  (`thinking.types.adaptive` supported, `enabled` false), matching the
+  official model overview
   (https://platform.claude.com/docs/en/models/overview,
-  https://www.anthropic.com/claude-fable-and-mythos-5-2). Routes through the
-  existing Fable tier alias (`fable[1m]`) with per-request model pinning to
-  `claude-fable-5-2`, preserving canonical `claude-fable-5-1` as the bare
-  alias default. Telemetry prices 5.2 at official rates: $8/M input, $40/M
-  output, $0.20/M cache read, $10/M 5-min cache write
-  (https://platform.claude.com/docs/en/about-claude/pricing).
+  https://www.anthropic.com/claude-fable-and-mythos-5-2). Both route through
+  the existing Fable tier alias (`fable[1m]`) with per-request model pinning
+  to the requested `claude-fable-5-2` / `claude-mythos-5-2` id, preserving
+  canonical `claude-fable-5-1` as the bare alias default; Mythos has no
+  separate SDK alias and shares the Fable tier like earlier Mythos
+  generations. Telemetry prices both 5.2 models at identical official rates:
+  $8/M input, $40/M output, $0.20/M cache read, $10/M 5-min cache write
+  (https://platform.claude.com/docs/en/about-claude/pricing); historical
+  Fable/Mythos generations keep their FABLE rates.
 - **Passthrough tool sets are shared by content, never by lifetime.** Sessions
   sending identical tools share one built definition set (#1410) and one raw
   tool list (#1444), found through process-wide indexes keyed by a digest of
@@ -98,6 +120,17 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   (not whole-server memory): built sets from about 20 MiB per session to one
   shared set; the remaining per-session heap from about 1 MiB to about 80 KiB. Shared values are read-only; each query still
   builds its own MCP server from them.
+- **A client that defers tools is never auto-deferred; one that also brings
+  its own `ToolSearch` gets the only search path.** The session pin holds the
+  auto-defer answer (#861), so a threshold crossing cannot flip the tool
+  block, `ENABLE_TOOL_SEARCH` or `maxTurns` mid-session. With a client
+  `ToolSearch` (Claude Code): eager tools stay registered, a deferred tool
+  joins them eagerly once referenced, unreferenced ones stay unregistered,
+  Meridian adds no inner ToolSearch, `tool_reference` blocks reach the model
+  as text naming the registered tool (a copied client name is undispatchable,
+  #1107), and each discovery re-primes the prompt cache by changing the
+  registered set. Other client-deferral keeps the inner ToolSearch and maps
+  `tool_reference` names to the registered names at a checkpoint.
 - **Transcript retention is opt-in and delegated to Claude Code (#1261,
   owner decision 2026-10-27).** Meridian's empty `settingSources` (#490/#634)
   also skips Claude Code's retention cleanup, so transcripts Meridian's own GC
@@ -188,7 +221,10 @@ Contract*, *Cancellation Contract*; public routes and headers are in
     read from the usage it reported, whatever ended it: a tool-boundary stop
     (the single-turn cap's `max_turns`, the single-step abort) keeps the
     session tracked, since an agent waiting at a tool call is the main case.
-    Only a client abort, which evicts the session, drops tracking.
+    Only a client abort drops tracking. It usually evicts the session too; a
+    session it keeps behind the interrupted-turn check (see `session` →
+    *Interrupted turns*) stays untracked until a later turn writes the
+    one-hour tier.
 
 ## Codex Responses wire contract
 

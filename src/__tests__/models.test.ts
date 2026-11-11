@@ -202,6 +202,23 @@ describe("mapModelToClaudeModel", () => {
       expect(mapModelToClaudeModel("claude-mythos-5-1")).toBe("fable[1m]")
       expect(mapModelToClaudeModel("claude-mythos-5-1", "max", "subagent")).toBe("fable")
     })
+
+    it("routes claude-mythos-5-2 through the fable tier like every mythos generation", () => {
+      expect(mapModelToClaudeModel("claude-mythos-5-2")).toBe("fable[1m]")
+      expect(mapModelToClaudeModel("claude-mythos-5-2", "max", "primary")).toBe("fable[1m]")
+      expect(mapModelToClaudeModel("claude-mythos-5-2", "max", "subagent")).toBe("fable")
+      expect(mapModelToClaudeModel("claude-mythos-5-2[1m]")).toBe("fable[1m]")
+    })
+
+    it("downgrades claude-mythos-5-2 to fable during the Extra Usage cooldown", () => {
+      recordExtendedContextUnavailable()
+      expect(mapModelToClaudeModel("claude-mythos-5-2", "max")).toBe("fable")
+    })
+
+    it("downgrades claude-mythos-5-2 to fable when MERIDIAN_1M_CONTEXT_SUPPORT=0", () => {
+      process.env.MERIDIAN_1M_CONTEXT_SUPPORT = "0"
+      expect(mapModelToClaudeModel("claude-mythos-5-2", "max")).toBe("fable")
+    })
   })
 
   describe("subagent mode", () => {

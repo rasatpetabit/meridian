@@ -8,10 +8,12 @@ import { VALID_EFFORTS } from "../proxy/effort"
 import { buildModelList } from "../proxy/openai"
 import { chatGptModelList } from "../proxy/chatgpt/catalog"
 import {
+  BUILTIN_CATALOG,
   DEFAULT_BASE_URL,
   MERIDIAN_PI_EFFORTS,
   STORED_CATALOG_TTL_MS,
   buildModels,
+  cacheOnlyModels,
   catalogStoreEntry,
   fetchCatalog,
   normalizeBaseUrl,
@@ -47,6 +49,12 @@ describe("Pi extension catalog parsing", () => {
   // The plugin cannot import from src/, so the effort vocabulary is duplicated.
   test("knows exactly the effort levels the proxy accepts", () => {
     expect([...MERIDIAN_PI_EFFORTS]).toEqual([...VALID_EFFORTS])
+  })
+
+  // Likewise the built-in catalog: it must be what this Meridian's /v1/models
+  // serves without the legacy Opus 4.6 1M entitlement or the 1M opt-out.
+  test("ships exactly the Claude models the proxy serves by default", () => {
+    expect(BUILTIN_CATALOG).toEqual(parseCatalog({ object: "list", data: buildModelList(false, 0) })!)
   })
 
   test("reads every Claude model Meridian advertises", () => {
@@ -121,6 +129,40 @@ describe("Pi extension model definitions", () => {
     expect(model!.contextWindow).toBe(12345)
     expect(model!.maxTokens).toBe(known.maxTokens)
     expect(model!.cost).toEqual(known.cost)
+  })
+
+  test("falls back to the matching Fable metadata and explicit 5.2 rates when Pi lacks 5.2", () => {
+    // Pi 1.3.0's anthropic.json carries neither Mythos ids nor Fable 5.2;
+    // both 5.2 entries must still get 128k output, official $8/$40/$0.20/$10
+    // pricing, image input, and adaptive-only compatibility metadata.
+    const [mythos52, fable52] = buildModels([
+      { id: "claude-mythos-5-2", name: "Mythos 5.2", contextWindow: 1_000_000 },
+      { id: "claude-fable-5-2", name: "Fable 5.2", contextWindow: 1_000_000 },
+    ], anthropicModels, BASE)
+    expect(fable52!.maxTokens).toBe(128_000)
+    expect(fable52!.cost).toEqual({ input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10 })
+    expect(fable52!.reasoning).toBe(true)
+    expect(fable52!.input).toEqual(["text", "image"])
+    expect(fable52!.compat).toMatchObject({
+      forceAdaptiveThinking: true,
+      supportsTemperature: false,
+      supportsMidConvoToolChanges: false,
+    })
+    expect(mythos52!.maxTokens).toBe(128_000)
+    expect(mythos52!.cost).toEqual(fable52!.cost)
+    expect(mythos52!.compat).toEqual(fable52!.compat)
+
+    // The generations Pi does know are inherited concretely.
+    const [mythos51, mythos5] = buildModels([
+      { id: "claude-mythos-5-1", name: "Mythos 5.1", contextWindow: 1_000_000 },
+      { id: "claude-mythos-5", name: "Mythos 5", contextWindow: 1_000_000 },
+    ], anthropicModels, BASE)
+    const fable51 = anthropicModels.find(model => model.id === "claude-fable-5-1")!
+    const fable5 = anthropicModels.find(model => model.id === "claude-fable-5")!
+    expect(mythos51!.maxTokens).toBe(fable51.maxTokens)
+    expect(mythos51!.cost).toEqual(fable51.cost)
+    expect(mythos5!.maxTokens).toBe(fable5.maxTokens)
+    expect(mythos5!.cost).toEqual(fable5.cost)
   })
 
   test("gives an unknown model a conservative output limit and zero cost", () => {
@@ -198,6 +240,11 @@ describe("Pi extension discovery request", () => {
     await expect(fetchCatalog(BASE, undefined, AbortSignal.timeout(1000), status)).rejects.toThrow("HTTP 401")
     const malformed = (async () => Response.json({ nope: true })) as unknown as typeof fetch
     await expect(fetchCatalog(BASE, undefined, AbortSignal.timeout(1000), malformed)).rejects.toThrow("malformed")
+    const chatGptOnly = (async () => Response.json({
+      object: "list",
+      data: chatGptModelList([{ slug: "gpt-6.1", displayName: "GPT-6.1", contextWindow: null, plans: null }], 0),
+    })) as unknown as typeof fetch
+    await expect(fetchCatalog(BASE, undefined, AbortSignal.timeout(1000), chatGptOnly)).rejects.toThrow("no usable Claude models")
   })
 })
 
@@ -220,6 +267,25 @@ describe("Pi extension stored catalog", () => {
     expect(restoreModels(entry, BASE, 1_000 + STORED_CATALOG_TTL_MS)).toEqual(models)
     expect(restoreModels(entry, BASE, 1_001 + STORED_CATALOG_TTL_MS)).toBeUndefined()
     expect(restoreModels(entry, BASE, 999)).toBeUndefined()
+  })
+
+  test("restores an expired snapshot when asked for one of any age", () => {
+    const entry = catalogStoreEntry("meridian", models, 1_000)
+    expect(restoreModels(entry, BASE, 1_001 + STORED_CATALOG_TTL_MS, Number.POSITIVE_INFINITY)).toEqual(models)
+    expect(restoreModels(entry, "http://127.0.0.1:3458", 1_001 + STORED_CATALOG_TTL_MS, Number.POSITIVE_INFINITY)).toBeUndefined()
+    expect(restoreModels(entry, BASE, 999, Number.POSITIVE_INFINITY)).toBeUndefined()
+  })
+
+  test("answers the cache-only phase with a fresh, then a complete expired, then the built-in catalog", () => {
+    const builtIn = buildModels(BUILTIN_CATALOG, anthropicModels, BASE)
+    const expiredAt = 1_001 + STORED_CATALOG_TTL_MS
+    const partial = models.filter(model => model.id !== "claude-haiku-5-5")
+    expect(cacheOnlyModels(catalogStoreEntry("meridian", partial, 1_000), BASE, 2_000, builtIn)).toEqual(partial)
+    expect(cacheOnlyModels(catalogStoreEntry("meridian", models, 1_000), BASE, expiredAt, builtIn)).toEqual(models)
+    // An expired catalog missing a model the extension knows predates its Meridian version.
+    expect(cacheOnlyModels(catalogStoreEntry("meridian", partial, 1_000), BASE, expiredAt, builtIn)).toEqual(builtIn)
+    expect(cacheOnlyModels(catalogStoreEntry("meridian", models, 1_000), "http://127.0.0.1:3458", 2_000, builtIn)).toEqual(builtIn)
+    expect(cacheOnlyModels(undefined, BASE, 0, builtIn)).toEqual(builtIn)
   })
 
   test("ignores a missing or empty snapshot", () => {

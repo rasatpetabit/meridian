@@ -39,6 +39,13 @@ export const landingHtml = `<!DOCTYPE html>
   .intro code { font-family: 'SF Mono', SFMono-Regular, Consolas, monospace; font-size: 12px;
     background: var(--surface); border: 1px solid var(--border); border-radius: 5px;
     padding: 1px 6px; color: var(--accent2); white-space: nowrap; }
+  /* The address chips carry this instance's own host, which can be longer
+     than a phone's column: a 37-character host was 348px in a 272px column at
+     320px and scrolled the page sideways. A desktop keeps each chip unbroken;
+     a phone lets it wrap. */
+  @media (max-width: 720px) {
+    .intro code { white-space: normal; overflow-wrap: anywhere; }
+  }
   .intro a { color: var(--accent); text-decoration: none; }
   .intro a:hover { text-decoration: underline; }
   .intro-meta { font-size: 12px; color: var(--muted); margin-top: 8px; }
@@ -123,8 +130,16 @@ export const landingHtml = `<!DOCTYPE html>
 
   /* Account details on hover. Drawn rather than a title attribute: the native
      tooltip cannot show a label/value list, and this one has to match the grid
-     on /profiles row for row. */
-  .prof-info { position: relative; display: inline-flex; }
+     on /profiles row for row.
+
+     It hangs from the header row and spans the card, 6px in from each edge,
+     rather than hanging off the icon: at a 256px minimum the values (an
+     email, the allowance) wrapped onto two lines each. The row spans the
+     card's content box, so the popup reaches out past it by the card's
+     padding less those 6px; that keeps it inside a phone's viewport too,
+     where the card is the full width. */
+  .profile-head { position: relative; }
+  .prof-info { display: inline-flex; }
   .prof-info-dot { width: 14px; height: 14px; flex-shrink: 0; border-radius: 50%;
     border: 1px solid var(--border); background: var(--surface2); color: var(--muted);
     font-family: Georgia, 'Times New Roman', serif; font-style: italic; font-size: 10px;
@@ -132,8 +147,8 @@ export const landingHtml = `<!DOCTYPE html>
   .prof-info:hover .prof-info-dot, .prof-info:focus-within .prof-info-dot {
     border-color: var(--accent); color: var(--accent); }
   .prof-info-dot:focus-visible { outline: none; border-color: var(--accent); color: var(--accent); }
-  .prof-pop { position: absolute; top: calc(100% + 8px); left: -8px; z-index: 20;
-    min-width: 256px; padding: 12px 14px; background: var(--surface2);
+  .prof-pop { position: absolute; top: calc(100% + 8px); left: -14px; right: -14px; z-index: 20;
+    padding: 12px 14px; background: var(--surface2);
     border: 1px solid var(--border); border-radius: 10px;
     box-shadow: 0 8px 24px rgba(0,0,0,0.35);
     opacity: 0; visibility: hidden; transition: opacity 0.12s;
@@ -154,13 +169,8 @@ export const landingHtml = `<!DOCTYPE html>
   .prof-pop-value .cached-tag { color: var(--muted); font-size: 10px; font-style: italic; white-space: nowrap; }
   .prof-pop-value .fact-explanation { display: none; margin-top: 4px; color: var(--muted); font-family: inherit; line-height: 1.4; }
   .prof-pop-value:focus > .fact-explanation { display: block; }
-  /* A hidden overlay still counts toward the page's scroll width, and one
-     hung off the icon at 256px or more reaches past a phone's right edge.
-     On a narrow screen it spans the card's header row instead. */
   @media (max-width: 720px) {
-    .profile-head { position: relative; }
-    .prof-info { position: static; }
-    .prof-pop { left: 0; right: 0; min-width: 0; }
+    .prof-pop { left: -4px; right: -4px; }
   }
   /* A phone shows one card per row, each packed with usage rows and chips,
      so the page edge and the card's own padding give that room back. */
@@ -752,7 +762,12 @@ document.getElementById('content').addEventListener('keydown',function(e){
 viewSort=readStoredSort()||viewSort;
 meridianReorder.init({onSaved:refresh});
 refresh();
-setInterval(function(){if(!meridianReorder.dragging() && !infoPopOpen())refresh()},10000);
+function pollRefresh(){
+  if(document.visibilityState!=='visible'||meridianReorder.dragging()||infoPopOpen())return;
+  refresh();
+}
+setInterval(pollRefresh,10000);
+document.addEventListener('visibilitychange',pollRefresh);
 ` + profileBarJs + `
 </script>
 </body>

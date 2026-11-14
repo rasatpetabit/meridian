@@ -1,5 +1,217 @@
 # Mixed and multi-turn rejected checkpoint evidence
 
+## Verification and three-captured diagnosis (2026-11-14)
+
+**Status: guard verification passed; separate pre-existing all-captured resume
+result loss reproduced. No retention-policy change.** This section supersedes
+the unrerun-check and unexplained-control blockers in the historical checkpoint
+below, not its remaining live-model/client acceptance limits.
+
+Implementation tested: `dd5badbc155e4ac95321dedc74bfb2c31864b56c`.
+Production-baseline source comparison: `e1c37ba4f9a837fe898c28b1d5dadb0fcc17d563`.
+Linux x64, Bun 1.3.14, Agent SDK 0.2.141, actual Claude Code 2.1.322 at
+`/home/ras/.local/share/claude/versions/2.1.322`. All HTTP model requests used
+scripted loopback APIs and disposable state, not live inference or :3456.
+
+### Part 1 — final fixture verification
+
+```sh
+bun test src/__tests__/passthrough-early-stop-integration.test.ts src/__tests__/passthrough-early-stop.test.ts --timeout 30000
+# 279 pass, 0 fail, 2188 expect() calls; 279 tests across 2 files; exit 0
+npm run typecheck
+# > tsc --noEmit; exit 0
+```
+
+The exact two-file command with only `src/proxy/server.ts` and
+`src/proxy/passthroughEarlyStop.ts` restored from `e07c2eb0` exits 1:
+
+```text
+SyntaxError: Export named 'checkpointHasUncapturedCalls' not found in module '.../src/proxy/passthroughEarlyStop.ts'.
+195 pass
+10 fail
+1 error
+1992 expect() calls
+Ran 205 tests across 2 files.
+```
+
+Nine integration failures are assertion failures (eight capture-proof matrix
+cases plus the no-boundary late-fragment case): `expect(received).toBeUndefined()`
+receives a retained mapping. The additional file-load failure is expected
+because the new pure-helper tests import a helper absent from e07c2eb0; it is
+not evidence that those pure tests ran against the old implementation.
+Both source files were restored byte-for-byte in Python `finally`, including
+a printed `IMPLEMENTATION_RESTORED True`. No tests or assertions were changed.
+Logs: `/mnt/ai-scratch/meridian-mixed-rejection/verify-{focused,e07-focused,typecheck}.log`.
+
+All rows below use this command prefix (no retries):
+
+```sh
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322
+```
+
+| Arguments | Exit | Upstream requests | Checkpoint | Outcome |
+|---|---:|---:|---|---|
+| default | 0 | 2 | retained | native result, rejection rewound |
+| `--thinking --calls=1` | 0 | 2 | retained | native result, rejection rewound |
+| `--thinking --calls=3` | 0 | 2 | evicted | every real result replayed |
+| `--mixed --calls=2` | 0 | 2 | evicted | every real result replayed |
+| `--mixed --calls=2 --input-validation` | 0 | 2 | evicted | every real result replayed |
+| `--deferred --calls=2` | 0 | 3 | evicted | every real result replayed |
+| `--deferred --calls=2 --mixed --captured-last --non-stream` | 0 | 2 | evicted | every real result replayed |
+| `--deferred --calls=1` | 0 | 3 | evicted | real result replayed |
+| `--deferred --calls=1 --non-stream` | 0 | 3 | evicted | real result replayed |
+| `--deferred --calls=1 --input-validation` | 0 | 3 | evicted | real result replayed |
+| `--captured --calls=1` | 0 | 2 | retained | native result, denial rewound |
+
+The eight replay cases print
+`PASS follow-up: fresh replay, not a resumed continuation; real client result for every call; no CLI rejection`.
+The three retained cases print
+`PASS continuation: native assistant and real client result for every call; rejection rewound`.
+Every row's final JSON reports `liveModelCalls:0`; `CLIENT_CALLS` expected and
+received counts match. These all passed both before and after adding the
+harness diagnostics/pacing options. Final-harness logs are `final-cli-00.log`
+through `final-cli-10.log` in the same scratch directory. Typecheck passed
+again after the harness change; no application source changed in this phase.
+The final focused rerun also reports 279 pass, 0 fail, 2188 assertions
+(`final-focused.log`, exit 0); final typecheck is in `final-typecheck.log`.
+
+### Part 2(a) — identical pre-existing failure
+
+Run `--captured --calls=3` with the two implementation files restored from
+e1c37ba4, then with dd5badbc. Both exit 1 at the identical result assertion:
+
+```text
+SHAPE {"mixed":false,"deferred":false,"nonStream":false,"captured":true,"capturedLast":false,"inputValidation":false,"checkpointRetained":true,"firstRequestCalls":1}
+CLIENT_CALLS {"expected":3,"received":3}
+PASS lineage: exact streamed assistant plus client results is continuation
+RESUME_RESULTS {"real":["toolu_offline"],"internalError":["toolu_offline_1","toolu_offline_2"]}
+AssertionError: resumed upstream lacks real client result for toolu_offline_1
+```
+
+Logs: `final-e1c37ba4-buffered.log`, `final-dd5badbc-buffered.log`.
+Again, the implementation comparison used byte-preserving save/restore in
+`finally` and printed `IMPLEMENTATION_RESTORED True`.
+
+### Part 2(b) — all calls reach the client; loss is downstream
+
+`firstRequestCalls` counts **upstream HTTP requests before the client follow-up**,
+not tool calls (`scripts/e2e-offline-fresh-checkpoint.mjs:73-85`). One is the
+correct value for three parallel calls in one response. The unchanged exact
+client-call-set assertion passes (`scripts/e2e-offline-fresh-checkpoint.mjs:223-226`).
+Thus the premise that only one call reached the client is false.
+
+The fixture emits one `message_start`, then, for indices 0/1/2 in sequence,
+`content_block_start`, `input_json_delta`, `content_block_stop`; only after
+all blocks does it emit `message_delta(stop_reason=tool_use)`, then
+`message_stop` (`scripts/e2e-offline-fresh-checkpoint.mjs:89-108`). This is the
+ordinary Anthropic multi-block order, not one message-level stop per tool.
+The installed official Anthropic SDK's `src/lib/MessageStream.ts:567-618,673-686`
+accumulates these indexed blocks and sets the message stop reason at the final
+message delta; it does not require interleaved starts or an artificial barrier
+before PreToolUse. The local live parallel harness, read but **not run**, also
+documents CLI per-block dispatch while later calls stream
+(`scripts/e2e-stream-parallel.mjs:5-12`). No new upstream transport was invented.
+
+A temporary passive trace (restored in `finally`) observed this actual CLI order:
+
+```text
+message_start
+start(0), input(0), assistant(toolu_offline), PreToolUse(toolu_offline, generating=true), stop(0)
+start(1), input(1), assistant(toolu_offline_1), stop(1)
+start(2), input(2), assistant(toolu_offline_2), stop(2)
+message_delta, message_stop
+PreToolUse(toolu_offline_1, generating=false), user(deny toolu_offline)
+PreToolUse(toolu_offline_2, generating=false), user(deny toolu_offline_1)
+user(deny toolu_offline_2), result
+```
+
+The hook hold is intentional (`src/proxy/server.ts:4408-4419,4791-4805`):
+release after generation, not on the first tool's block stop. The tracker unions
+per-block expected IDs and independently observed resolved IDs
+(`src/proxy/passthroughEarlyStop.ts:111-174`), requires every expected ID resolved
+(`:180-186`), requires equality with the streamed set (`:458-467`), and only then
+allows a UUID-backed freeze (`:470-480`). The server additionally requires no
+active generation and no open client blocks (`src/proxy/server.ts:6832-6844`),
+and freezes the complete expected set (`:6257-6271`). The traced mapping contains
+all three IDs and the final tool assistant UUID; the actual transcript contains
+three assistant fragments followed by three denial results. No evidence here
+supports a premature single-call freeze.
+
+On the follow-up, passive instrumentation at `makePrompt`
+(`src/proxy/server.ts:4370-4374`) saw **one SDK user input containing all three
+native real tool_result blocks**. On the next loopback upstream request, the
+native assistant still has all three calls, but its user result contains:
+
+```text
+toolu_offline_1: [Tool result missing due to internal error] (is_error=true)
+toolu_offline_2: [Tool result missing due to internal error] (is_error=true)
+toolu_offline:   REAL_CLIENT_RESULT_toolu_offline
+```
+
+Trace logs: `trace-control.log`, `shape-paced-e1c37ba4.log`,
+`shape-paced-dd5badbc.log`. This localizes loss between SDK input and upstream
+request on the resumed CLI path, not in the client response or Meridian's
+structured-input wrapper. It does **not** identify the exact CLI internal cause.
+Temporary instrumentation was removed; no SDK/CLI package was edited.
+
+### Part 2(c) — paced/distinct production-like reproduction; stop
+
+To test both buffered delivery and same-tool dispatch hypotheses without
+weakening any assertion, the durable harness now accepts:
+
+```sh
+bun scripts/e2e-offline-fresh-checkpoint.mjs \
+  --claude=/home/ras/.local/share/claude/versions/2.1.322 \
+  --captured --calls=3 --sse-delay-ms=25 --distinct-tools
+```
+
+This sends **three different registered tools** (`mcp__oc__read`,
+`mcp__oc__read_1`, `mcp__oc__read_2`), with each frame enqueued individually
+and separated by 25 ms. All block stops still precede the sole message delta
+and message stop. Each call has valid, distinct JSON input. At maxTurns=1 all
+three receive the real forwarding denial; the unchanged HTTP client's exact
+assistant and grouped real results form a valid continuation, resumed at the
+stored assistant checkpoint. This is the most production-like shape tested,
+not a claim of a captured production provider stream.
+
+**Both e1c37ba4 and dd5badbc exit 1 with exactly the Part 2(a) output above.**
+Logs: `final-e1c37ba4-paced-distinct.log`, `final-dd5badbc-paced-distinct.log`.
+Pacing alone, without changing tool names, also fails identically on both.
+The first throwaway distinct-tool probe had an overbroad fixture substitution
+(`ReferenceError: index is not defined`) and was not used as defect evidence;
+the corrected probes and final committed harness reach the real-result
+assertion. These are explicit shape experiments, not green-until-pass retries.
+
+Conclusion: **a pre-existing real SDK/CLI-path result-loss defect under these
+conditions, not a harness artifact explained by SSE chunking or repeated tool
+names**. No all-captured retention change, production repair or further
+implementation attempted. Resolve the separate resume defect before claiming
+all-captured parallel result delivery is qualified.
+
+The named production journal snapshot has 64 `checkpoint_ready(captured=2)`
+and 7 `captured=3` events. Correlation by request ID finds 63 and 7 matching
+persisted `toolCalls` counts respectively; the remaining two-call ready event
+at line 11886 has no matching persisted event in this snapshot. A three-call
+example is ready/persisted at lines 7753/7756. The snapshot contains zero
+`tool_use ids were found without tool_result` errors. The operator also reports
+zero since 11-01; that larger interval was not independently queried here.
+Those facts establish successful checkpoint capture/publication, **not content
+of the subsequently delivered results**. CLI internal-error placeholders
+satisfy tool ID pairing, so the demonstrated loss need not cause that API error.
+There is no evidence here that these actual production turns lost results.
+
+### Changes and limits
+
+Only the harness and evidence/documentation changed since dd5badbc. The harness
+adds optional paced SSE and distinct registered names plus count/result-ID
+summaries; default fixture bytes and all acceptance assertions are preserved.
+No new product/architecture choice was made. The owning operator retains the
+separate decision about remediation of the all-captured resume defect.
+`git diff --check` passes. No push, build, install, full suite, restart, service
+request or live model call occurred. Independent final review and affected
+actual-model/client acceptance remain unperformed; the separate non-stream
+parallel forwarding and absent-boundary reachability limits below remain open.
+
 ## Capture-proof follow-up — BLOCKED, not qualified
 
 Follow-up baseline: `e07c2eb015beb71315d8e117381de17a66887bfa`.

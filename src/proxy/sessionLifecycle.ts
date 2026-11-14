@@ -111,6 +111,7 @@ export interface SessionLifecycleOptions {
   maxDeletesPerRun?: number
   lockWaitMs?: number
   lockRetryMs?: number
+  /** @deprecated Validated for compatibility; proven-dead lock owners are recovered without an age delay. */
   lockStaleMs?: number
   preparedGraceMs?: number
   deletingLeaseMs?: number
@@ -1420,7 +1421,7 @@ async function withSidecarLock<T>(
     const token = JSON.stringify({ pid: process.pid, hostname: hostname(), token: randomUUID(), incarnation })
     const deadline = performance.now() + nonNegativeOption(options.lockWaitMs, DEFAULT_LOCK_WAIT_MS, "lockWaitMs")
     const retryMs = option(options.lockRetryMs, DEFAULT_LOCK_RETRY_MS, "lockRetryMs")
-    const staleMs = option(options.lockStaleMs, DEFAULT_LOCK_STALE_MS, "lockStaleMs")
+    option(options.lockStaleMs, DEFAULT_LOCK_STALE_MS, "lockStaleMs")
     // Only the local head creates a durable candidate; local backlog consumes
     // neither the external acquisition budget nor candidate-file I/O.
     const candidate = await createInitializedSidecarLockCandidate(
@@ -1434,7 +1435,7 @@ async function withSidecarLock<T>(
           options.admissionSignal?.throwIfAborted()
           acquired = await candidate.publish()
           if (acquired) break
-          await recoverStaleLock(paths.lock, staleMs)
+          await recoverStaleLock(paths.lock)
           options.admissionSignal?.throwIfAborted()
           // Recovery itself may consume the contention budget while durably
           // retiring a dead owner. Try the now-free lock before deciding to
@@ -1657,7 +1658,7 @@ async function cleanupLifecycleRecoveryTombstones(claimPath: string): Promise<vo
   }
 }
 
-async function recoverStaleLock(lockPath: string, staleMs: number): Promise<void> {
+async function recoverStaleLock(lockPath: string): Promise<void> {
   let contents: string
   let info: Awaited<ReturnType<typeof stat>>
   try {
@@ -1667,10 +1668,7 @@ async function recoverStaleLock(lockPath: string, staleMs: number): Promise<void
     if (hasCode(error, "ENOENT")) return
     throw error
   }
-  if (
-    Date.now() - info.mtimeMs <= staleMs
-    || !canonicalLifecycleLockOwnerIsDead(contents)
-  ) return
+  if (!canonicalLifecycleLockOwnerIsDead(contents)) return
 
   const generation = contents
   const claimPath = getRecoveryClaimPath(lockPath, generation)
@@ -1702,10 +1700,7 @@ async function recoverStaleLock(lockPath: string, staleMs: number): Promise<void
       generationResolved = true
       return
     }
-    if (
-      Date.now() - currentInfo.mtimeMs <= staleMs
-      || !canonicalLifecycleLockOwnerIsDead(currentContents)
-    ) return
+    if (!canonicalLifecycleLockOwnerIsDead(currentContents)) return
 
     const quarantine = `${lockPath}.stale-${process.pid}-${randomUUID()}`
     await rename(lockPath, quarantine)

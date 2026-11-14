@@ -1,3 +1,15 @@
+## Signal-stopped requests and shutdown drain
+
+`node scripts/e2e-signal-exit.mjs` uses separately built baseline/fixed CLI
+instances, the real SDK/native Haiku 5.5 and the installed Pi AI provider (no Pi
+session). It verifies a request-child SIGTERM red/green, main-only SIGTERM with
+normal 30 s drain, admission refusal during drain and forced-grace socket-close
+retryability. Requires explicit built roots, private read-only credential source,
+Pi package/native executable paths and isolated scratch; see
+[reproduction, isolation and bounded evidence](docs/maintenance/SIGNAL_EXIT_TRANSIENT.md).
+It never signals production or another process tree. The service's systemd
+KillMode change is separate and is not activated by this test.
+
 ## Offline fresh-replay checkpoint
 
 `bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/absolute/path/to/claude`

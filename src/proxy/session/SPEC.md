@@ -72,6 +72,25 @@ Management*, *Lineage Verification*, *SQLite bookkeeping boundary*, *Transcript
 publication lifetime*, *Session store write cost*, *Lineage hash encoding* and
 *Appended content and transient hooks*.
 
+## Lifecycle lock recovery
+
+The JSON lifecycle lock records the owner's versioned process incarnation
+(host, boot, PID and process-start identity). Acquisition immediately recovers a
+lock only when that exact incarnation is provably dead, including PID reuse or
+a prior boot on the same host. No minimum lock age applies: a CLI shutdown can
+exit after its join deadline before an admitted transaction's `finally` unlinks
+the lock, and delaying a proven-dead owner only blocks the replacement process.
+`lockStaleMs` remains accepted and validated for compatibility but no longer
+delays this recovery. A live, foreign, malformed or indeterminate owner is never
+reclaimed by age alone.
+
+Recovery still serializes contenders through the generation-specific recovery
+claim, rechecks lock contents and device/inode plus owner death before moving
+the lock to quarantine, and releases by owner token. These checks prevent a
+recoverer or an old owner from unlinking a successor. This protocol does not
+change transcript writer-lease recovery or permit deleting a live writer's
+transcripts.
+
 ## Interrupted turns
 
 A client that stops a streaming turn after output reached it (Stop, Esc, a

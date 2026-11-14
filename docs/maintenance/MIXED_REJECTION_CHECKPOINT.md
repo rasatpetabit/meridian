@@ -1,6 +1,106 @@
 # Mixed and multi-turn rejected checkpoint evidence
 
-## Scope and outcome
+## Capture-proof follow-up — BLOCKED, not qualified
+
+Follow-up baseline: `e07c2eb015beb71315d8e117381de17a66887bfa`.
+The implementation now uses `checkpointHasUncapturedCalls` and the existing
+PreToolUse `forwardedToolUseIds` at JSON completion, SSE completion and
+captured/rejected recovery. Exactly one exception remains: the existing
+`canonicalRejectedCheckpoint`, with its conditions unchanged. In particular,
+single-call deferred rejections now evict. Captured single/multi-call
+retention eligibility is unchanged. The name-dispatch-only set remains solely
+for proving the canonical exception, not for excluding other refusals.
+
+JSON additionally checks every client-tool ID emitted in assistant metadata
+and stream events, including metadata consumed after early-stop latches. This
+covers advisory 1's absent-boundary fragment shape even when it is missing
+from the frozen candidate. A new mocked-SDK regression scripts that shape.
+`query.ts` requests `includePartialMessages: true` for passthrough on both
+paths, and `withReachability` does not buffer partial messages in that mode.
+However, **real CLI 2.1.322 absent-boundary reachability remains unresolved**:
+no passive SDK event-order witness was completed before the stop below. Do
+not infer impossibility from the requested option. The independent emitted-ID
+check fails closed regardless; repairing JSON's existing missing parallel-call
+forwarding is not part of this patch.
+
+### Stop condition: all-captured real-CLI result loss
+
+The extra control below exited 1 on the capture-proof implementation:
+
+```sh
+bun scripts/e2e-offline-fresh-checkpoint.mjs \
+  --claude=/home/ras/.local/share/claude/versions/2.1.322 \
+  --captured --calls=3
+```
+
+```text
+SHAPE {"mixed":false,"deferred":false,"nonStream":false,"captured":true,"capturedLast":false,"inputValidation":false,"checkpointRetained":true,"firstRequestCalls":1}
+PASS lineage: exact streamed assistant plus client results is continuation
+AssertionError: resumed upstream lacks real client result for toolu_offline_1
+```
+
+The harness verified forwarding denials in the real transcript for all three
+registered calls before reaching this assertion. This is outside the settled
+change (all-captured retention must remain unchanged). No retry, assertion
+weakening, alternate retention policy or live-service change was attempted.
+Verification stopped as instructed. This is a blocked local implementation
+checkpoint, not a completed fix or an integration candidate. The parent must
+resolve the scope conflict before qualification continues.
+
+### Evidence completed before the stop
+
+Same Linux/Bun/SDK/CLI versions as the historical record below. All probes
+use loopback fixtures, disposable state and zero live model calls.
+Logs: `/mnt/ai-scratch/meridian-mixed-rejection/capture-*.log`.
+
+- Real InputValidationError is reachable with the committed harness:
+  `--mixed --calls=2 --input-validation` emits raw-tab JSON to the registered
+  name, and checks the CLI transcript's exact InputValidationError prefix.
+  On e07c2eb0 it exits 1:
+  `AssertionError: resumed upstream lacks real client result for toolu_offline_1`.
+  On the capture-proof implementation it exits 0, with
+  `checkpointRetained:false`, `upstreamCalls:2`, `liveModelCalls:0`, and
+  `PASS follow-up: fresh replay, not a resumed continuation; real client result for every call; no CLI rejection`.
+- The real `--deferred --calls=1 --input-validation` baseline exits 1 at
+  `uncaptured checkpoint must be evicted except the canonical single-call name-dispatch control`
+  (`true !== false`). Its green run was not reached after the stop.
+- All eight requested real-CLI controls exit 0: default,
+  `--thinking --calls=1`, `--thinking --calls=3`, `--mixed --calls=2`,
+  `--deferred --calls=2`,
+  `--deferred --calls=2 --mixed --captured-last --non-stream`,
+  `--deferred --calls=1`, and `--deferred --calls=1 --non-stream`.
+  Each reports `liveModelCalls:0`; expected total upstream calls are
+  respectively 2, 2, 2, 2, 3, 2, 3, 3. `--captured --calls=1` also exits 0
+  and preserves native resume. The subsequent three-captured control fails
+  as recorded above, before the additional deferred-input probes.
+- Preliminary focused run:
+  `bun test src/__tests__/passthrough-early-stop-integration.test.ts src/__tests__/passthrough-early-stop.test.ts --timeout 30000`
+  reports **278 pass, 0 fail, 2182 assertions**. Existing captured,
+  canonical-rejected and all-captured mocked retention tests were unchanged.
+  This run predates the new no-boundary regression and the fixture correction
+  below, so it is not final-head evidence.
+- Preliminary baseline integration run after adding the no-boundary case:
+  **195 pass, 9 fail, 1992 assertions**, exit 1. Eight failures are the
+  uncaptured-refusal matrix; the ninth is the no-boundary fragment case.
+  The added name-dispatch non-stream H1 case already passes on e07c2eb0;
+  it is a missing-coverage control, not a new baseline failure.
+- `npm run typecheck`: exit 0, `tsc --noEmit`, after adding the no-boundary
+  test and before the fixture correction below.
+
+**Evidence limitation discovered during final diff inspection:** the shell
+adapter expanded `${call.name}` inside the newly generated integration
+fixture, so those preliminary mocked runs used an InputValidationError-shaped
+string without its tool name. The fixture now has the exact named refusal,
+and the no-boundary test key again includes its run ID. Those corrected tests
+and the final focused/typecheck gates have **not** been rerun because of the
+explicit stop condition. The real-CLI raw-tab red/green evidence is unaffected.
+The harness keeps strict JSON.parse for ordinary controls and repairs JSON
+only for the explicit raw-tab control; final bytes of that narrow harness
+change also remain unqualified. No full suite, build, install, push, restart,
+live-service request or live model was run. The historical record below
+qualifies only the earlier e07c2eb0 patch, not this blocked follow-up.
+
+## Historical e07c2eb0 scope and outcome
 
 Baseline: `e1c37ba4f9a837fe898c28b1d5dadb0fcc17d563` (fork main).
 Linux x64, Bun 1.3.14, Agent SDK 0.2.141, Claude Code 2.1.322 at

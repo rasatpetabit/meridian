@@ -1,5 +1,189 @@
 # Mixed and multi-turn rejected checkpoint evidence
 
+## Unstreamed SSE publication blocker (2026-11-14)
+
+**Status: fixed and locally verified on `fix/mixed-rejection-resume`; no push,
+PR, integration or activation.** Implementation commit: `fe2e389e`. This
+follow-up starts at `27c03fdb` and closes its publication gap; it does not change
+the approved replay policy. The running
+`meridian.service`, installed main `e1c37ba4`, and live cache were not touched.
+No live model calls were made. Real-CLI evidence uses Linux x64, Bun 1.3.14,
+Agent SDK 0.2.141 and Claude Code 2.1.322 at the path below.
+
+### RED: unstreamed completion really resumes and loses results
+
+Reused the existing offline HTTP/SDK/CLI harness, tracker and publication gates;
+no new transport or SDK/CLI patch. `--unstreamed` creates a disposable launcher
+that **execs the named real CLI with only `--include-partial-messages` removed**.
+The SDK iterator, tool hooks, PostToolBatch success, transcript persistence and
+resume remain real. This forces the assistant-only output shape, not the
+upstream rate-limit failure that can cause it naturally. Runtime diagnostics
+assert zero SDK stream events and execution of `openUnstreamedEnvelope`:
+
+```text
+UNSTREAMED {"streamEventsSeen":0,"envelopeForwarded":true}
+```
+
+With only server.ts and passthroughEarlyStop.ts temporarily restored from
+`27c03fdb`, each command below exits **1** (final harness assertions unchanged).
+Python `finally` restores saved source bytes and checks
+`IMPLEMENTATION_RESTORED True`; no git history or refs are rewritten.
+
+```sh
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322 --deferred --unstreamed --captured --calls=2
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322 --deferred --unstreamed --mixed --calls=2
+```
+
+Both report `checkpointRetained:true`, continuation lineage, and
+`RESUME_RESULTS {"real":[],"internalError":["toolu_offline_1"]}`, then fail
+`resumed upstream lacks real client result for toolu_offline`. The captured row
+emits exactly 2/2 client calls. The mixed row emits 1/1 captured client calls out
+of two upstream calls: the existing assistant-only envelope does not forward
+uncaptured rejected calls. The harness explicitly asserts that subset only for
+`--unstreamed`; all original rows still assert the complete upstream call set.
+This work fixes unsafe resume and real-result loss, not that separate forwarding
+limitation. Every GREEN row checks every real result the client returned.
+
+The HTTP regression command against the same baseline implementation:
+
+```sh
+bun test src/__tests__/passthrough-early-stop-integration.test.ts --timeout 30000 --test-name-pattern 'publication guard replays SSE'
+# exit 1: 0 pass, 7 fail, 48 assertions; 218 filtered out.
+```
+
+All seven reach the follow-up and fail at `options.resume` being present:
+assistant-only two-captured, mixed and uncaptured completion; latch-before-drain
+with late metadata, late metadata plus wire, wire-only with no assistant metadata,
+and capped-error recovery. Thus the independent capture-proof advisory was
+reproduced, not assumed. The wire-only row also failed against the intermediate
+metadata-only fix (exit 1, 0 pass/1 fail, 7 assertions), proving the need to keep
+observing raw calls even when drain suppresses their frames.
+
+Silent-turn RED (before its write-side fix):
+
+```sh
+bun test src/__tests__/silent-turn-recovery.test.ts --timeout 30000 --test-name-pattern 'publication guard'
+# exit 1: 1 pass, 2 fail, 22 assertions; 14 filtered out.
+```
+
+The one-call control retains; the two/three-call recovery rows publish unsafe
+mappings. Their existing read guard already replays, but does not excuse that
+write-side invariant violation.
+
+### Shared write-side invariant and GREEN
+
+`checkpointPublicationRequiresReplay` in `passthroughEarlyStop.ts` is the one
+publication policy used by JSON completion, SSE normal completion,
+captured-error recovery and silent recovery. Before a tool turn can publish:
+
+- the candidate must have a settled assistant UUID and canonical SDK result;
+- its exact ID set must equal the client-visible batch, with exactly one call;
+- every observed assistant/wire call must have capture proof, including calls
+  seen after latching during hidden drain. The existing canonical single-call
+  name-dispatch exception supplies proof only for its one streamed ID.
+
+JSON supplies its completed response blocks. SSE supplies the union of streamed
+IDs and captured calls queued for its final envelope, so a zero-partial-events
+turn cannot masquerade as plain text and publish null checkpoint metadata.
+Assistant-only single-call capture can settle after canonical drain and retain a
+real rewind checkpoint. Captured hidden digest metadata pruned from the client
+batch does not alone make the batch multi-call. Ordinary single-call retention,
+plain text resume and the canonical single-call exception remain covered.
+
+Silent recovery applies the same policy before releasing buffered output. A
+multi-call recovery wins exact-generation eviction instead of publishing its
+fork; it then emits the complete captured batch and abandons the unreferenced
+fork. A new CAS-race regression verifies that losing eviction withholds calls
+and preserves the winning mapping. Single-call recovery still publishes and
+resumes its exact fork/assistant UUID. No mapping schema or public API changed.
+
+Focused GREEN command (also covers the old single-call, hidden-digest,
+alternate-message-start, duplicate and deny-hold controls):
+
+```sh
+bun test src/__tests__/proxy-passthrough-deny-abort.test.ts src/__tests__/proxy-stream-deny-hold.test.ts src/__tests__/passthrough-early-stop-integration.test.ts src/__tests__/passthrough-early-stop.test.ts src/__tests__/silent-turn-recovery.test.ts --timeout 30000
+# exit 0: 348 pass, 0 fail, 2650 assertions across 5 files.
+```
+
+The exact seven-row RED integration command is GREEN: exit 0, 7 pass, 0 fail,
+62 assertions (218 filtered out). The silent command extended to include the
+CAS case (`--test-name-pattern 'publication guard|replay invalidation'`) is
+GREEN: exit 0, 4 pass, 0 fail, 32 assertions (14 filtered out).
+
+A development run initially had 344 pass/1 fail: settling every otherwise
+complete streamed candidate at publication broadened retention for the existing
+alternate-second-message-start case. Settlement is now restricted to the
+zero-stream-event assistant-only fallback; the original noncanonical streamed
+case still evicts. Ten direct pure-function cases cover publication policy.
+
+### Final real-CLI matrix: original 14 plus five unstreamed rows
+
+Every row uses this prefix, exits **0**, reports `liveModelCalls:0`, and checks
+exact client-call equality, no extra retry, every real result, and no CLI denial
+or internal-error placeholder on the follow-up. The five new rows also require
+the `UNSTREAMED` runtime witness above. The complete 19-row matrix passed twice;
+the final run adds the explicit runtime witness, rather than treating removal
+of the CLI flag alone as proof of the path.
+
+```sh
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322
+```
+
+| Arguments | Pass/fail | Upstream requests | Client calls | Checkpoint |
+|---|---|---:|---:|---|
+| default | 1/0 | 2 | 1 | retained |
+| `--thinking --calls=1` | 1/0 | 2 | 1 | retained |
+| `--thinking --calls=3` | 1/0 | 2 | 3 | evicted |
+| `--mixed --calls=2` | 1/0 | 2 | 2 | evicted |
+| `--mixed --calls=2 --input-validation` | 1/0 | 2 | 2 | evicted |
+| `--deferred --calls=2` | 1/0 | 3 | 2 | evicted |
+| `--deferred --calls=2 --mixed --captured-last --non-stream` | 1/0 | 2 | 2 | evicted |
+| `--deferred --calls=1` | 1/0 | 3 | 1 | evicted |
+| `--deferred --calls=1 --non-stream` | 1/0 | 3 | 1 | evicted |
+| `--deferred --calls=1 --input-validation` | 1/0 | 3 | 1 | evicted |
+| `--captured --calls=1` | 1/0 | 2 | 1 | retained |
+| `--captured --calls=2` | 1/0 | 2 | 2 | evicted |
+| `--captured --calls=3` | 1/0 | 2 | 3 | evicted |
+| `--captured --calls=3 --sse-delay-ms=25 --distinct-tools` | 1/0 | 2 | 3 | evicted |
+| `--unstreamed --deferred --captured --calls=1` | 1/0 | 2 | 1 | retained |
+| `--unstreamed --deferred --captured --calls=2` | 1/0 | 2 | 2 | evicted |
+| `--unstreamed --deferred --captured --calls=3` | 1/0 | 2 | 3 | evicted |
+| `--unstreamed --deferred --mixed --calls=2` | 1/0 | 2 | 1 of 2 upstream | evicted |
+| `--unstreamed --deferred --mixed --calls=2 --captured-last` | 1/0 | 2 | 1 of 2 upstream | evicted |
+
+**19 pass / 0 fail.** The two formerly failing real-CLI rows now report
+`checkpointRetained:false` and `PASS follow-up: fresh replay, not a resumed
+continuation; real client result for every call; no CLI rejection`.
+
+### Full gates and residual boundaries
+
+| Command | Exit | Result |
+|---|---:|---|
+| `npm test` (pretest typechecks) | 0 | 9056 pass, 0 fail, 28 skip, 50320 assertions across 32 isolated runs |
+| `npm run typecheck` | 0 | `tsc --noEmit`, no diagnostics |
+| `npm run build` | 0 | Node entrypoints checked; certified local build 3 (`34c21b4f-b987-4e1c-bef3-d52414d203fc`) |
+| `git diff --check` | 0 | no whitespace errors |
+
+The first full-suite invocation was interrupted by its 300-second command limit
+before a test summary, with no reported failure; it is not counted as a pass.
+Two subsequent runs with a 1200-second limit completed all 32 declared groups
+(9056/0/28 each); the final run after source cleanup is tabulated above. The 28
+existing skips remain the unsupplied bookkeeping compatibility fixture (27)
+and Windows-only PID-reuse case (1). No hooks were skipped or test-runner
+isolation changed in this follow-up.
+
+No new product or architecture choice was made; this enforces the already
+approved fresh-replay requirement. Native multi-call SDK resume remains
+unqualified, fresh replay still loses SDK-only context absent from client
+history, and real live-model/client acceptance remains unperformed by explicit
+instruction. The real-CLI no-partial-event shape is forced by a launcher, not a
+claim to have reproduced spontaneous CLI stream fallback. The latch and silent
+recovery regressions are mocked-HTTP evidence, not real-CLI reachability claims.
+Independent cross-vendor review of this follow-up remains with the orchestrator:
+this engineer's tool surface provides no governed reviewer dispatch, and no
+substitute live model call was made. No push, PR, install, live-cache write or
+service operation is authorized or performed.
+
 ## Approved all-captured fallback (2026-11-14)
 
 **Status: implemented and locally verified; not reviewed, integrated or activated.**

@@ -14,6 +14,14 @@ assistant/result context with the rejection rewound, and asserts exactly two
 upstream calls (no retry or digest). This proves transport and persistence, not
 live model name selection or actual prompt-cache billing.
 
+For exact client-echo lineage diagnostics, add `--thinking --calls=1` or
+`--thinking --calls=3`. `--transient-tail` removes/reappends a two-user request
+suffix on the follow-up: it must reproduce `modified-history`, not silently
+resume changed ancestry. The three-call canonical-rejection control currently
+passes lineage but fails native client-result delivery; retain that failure,
+not a green qualification of parallel checkpoints. See the
+[modified-history diagnosis and evidence](docs/maintenance/MODIFIED_HISTORY_LOOP.md).
+
 ## Pi extension (#1408)
 
 Three harnesses use the actual Pi CLI with the extension that

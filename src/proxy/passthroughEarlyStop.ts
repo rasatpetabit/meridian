@@ -185,6 +185,48 @@ export function allForwardedCallsResolved(tracker: EarlyStopTracker): boolean {
   return true
 }
 
+export function checkpointHasUncapturedCalls(
+  toolCallIds: Iterable<string> | undefined,
+  forwardedToolUseIds: ReadonlySet<string>,
+): boolean {
+  for (const id of toolCallIds ?? []) {
+    if (!forwardedToolUseIds.has(id)) return true
+  }
+  return false
+}
+
+export function checkpointRequiresReplay(
+  toolCallIds: Iterable<string> | undefined,
+  forwardedToolUseIds: ReadonlySet<string>,
+): boolean {
+  const ids = new Set(toolCallIds)
+  return ids.size > 1 || checkpointHasUncapturedCalls(ids, forwardedToolUseIds)
+}
+
+export function checkpointPublicationRequiresReplay({
+  clientToolCallIds,
+  checkpointToolCallIds,
+  observedToolCallIds,
+  forwardedToolUseIds,
+  checkpointReady,
+}: {
+  clientToolCallIds: Iterable<string>
+  checkpointToolCallIds: Iterable<string> | undefined
+  observedToolCallIds: Iterable<string>
+  forwardedToolUseIds: ReadonlySet<string>
+  checkpointReady: boolean
+}): boolean {
+  const visible = new Set(clientToolCallIds)
+  const observed = new Set(observedToolCallIds)
+  if (visible.size === 0 && observed.size === 0) return false
+  const checkpoint = new Set(checkpointToolCallIds)
+  return !checkpointReady ||
+    visible.size !== checkpoint.size ||
+    [...visible].some(id => !checkpoint.has(id)) ||
+    checkpointRequiresReplay(visible, forwardedToolUseIds) ||
+    checkpointHasUncapturedCalls(observed, forwardedToolUseIds)
+}
+
 /**
  * Opt-in flags for the checkpoint continuation validators.
  */

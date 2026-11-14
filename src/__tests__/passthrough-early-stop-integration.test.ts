@@ -212,6 +212,13 @@ async function post(app: any, body: any, sessionHeader = "es-session", extraHead
   }))
 }
 
+async function serializedPrompt(prompt: string | AsyncIterable<unknown>): Promise<string> {
+  if (typeof prompt === "string") return prompt
+  const messages: unknown[] = []
+  for await (const message of prompt) messages.push(message)
+  return JSON.stringify(messages)
+}
+
 async function readNaturallyClosedStream(response: Response): Promise<string> {
   const reader = response.body!.getReader()
   const chunks: Uint8Array[] = []
@@ -383,7 +390,7 @@ describe("Integration: passthrough early stop", () => {
   }
 
   for (const count of [1, 3]) for (const transientTail of [false, true]) {
-    it(`stream: client-visible thinking + ${count} calls ${transientTail ? "with a transient user suffix diverges" : "keeps fresh replay lineage"} over three turns`, async () => {
+    it(`stream: client-visible thinking + ${count} calls ${count > 1 ? "replays every batch" : transientTail ? "with a transient user suffix diverges" : "keeps fresh replay lineage"} over three turns`, async () => {
       const sessionKey = `modified-history-${count}-${transientTail}-${TEST_RUN_ID}`
       usedSessionKeys.add(sessionKey)
       const headers = { "x-meridian-agent": "pi", "user-agent": "pi/1.4.0", "x-session-affinity": sessionKey }
@@ -428,20 +435,30 @@ describe("Integration: passthrough early stop", () => {
         expect(body).not.toContain("event: error")
         expect(parseSSE(body).some(({ event, data }) => event === "message_delta" &&
           (data.delta as Record<string, unknown>)?.stop_reason === "tool_use")).toBe(true)
-        const mapping = lookupSharedSession(sessionKey)!
-        expect(mapping).toBeDefined()
-        // The response is not in the stored request prefix. Its UUID and tool
-        // IDs are a separate checkpoint, not assistant-content lineage hashes.
-        expect(mapping.messageCount).toBe(requestHistory.length)
-        expect(mapping.messageHashes).toEqual(computeMessageHashes(requestHistory))
-        if (turn === 0 || transientTail) expect(capturedQueryParams.options.resume).toBeUndefined()
-        else expect(capturedQueryParams.options.resume).toBe(previousSession)
-        if (transientTail) {
-          const digest = mapping.messageHashes![requestHistory.length - 2]
-          if (turn > 0) expect(digest).toBe(previousSuffixDigest)
-          previousSuffixDigest = digest
+        const mapping = lookupSharedSession(sessionKey)
+        if (count > 1) {
+          expect(mapping).toBeUndefined()
+          expect(capturedQueryParams.options.resume).toBeUndefined()
+          const prompt = await serializedPrompt(capturedQueryParams.prompt)
+          for (let previousTurn = 0; previousTurn < turn; previousTurn++) for (let index = 0; index < count; index++) {
+            expect(prompt).toContain(`client-result-call-${previousTurn}-${index}`)
+          }
+        } else {
+          expect(mapping).toBeDefined()
+          if (!mapping) throw new Error("missing single-call checkpoint")
+          // The response is not in the stored request prefix. Its UUID and tool
+          // IDs are a separate checkpoint, not assistant-content lineage hashes.
+          expect(mapping.messageCount).toBe(requestHistory.length)
+          expect(mapping.messageHashes).toEqual(computeMessageHashes(requestHistory))
+          if (turn === 0 || transientTail) expect(capturedQueryParams.options.resume).toBeUndefined()
+          else expect(capturedQueryParams.options.resume).toBe(previousSession)
+          if (transientTail) {
+            const digest = mapping.messageHashes![requestHistory.length - 2]
+            if (turn > 0) expect(digest).toBe(previousSuffixDigest)
+            previousSuffixDigest = digest
+          }
+          previousSession = mapping.claudeSessionId
         }
-        previousSession = mapping.claudeSessionId
 
         // Reconstruct exactly the assistant that an Anthropic streaming client received.
         const blocks: Array<Record<string, unknown>> = []
@@ -461,6 +478,7 @@ describe("Integration: passthrough early stop", () => {
         history.push({ role: "assistant", content: blocks }, { role: "user", content: calls.map(call => ({
           type: "tool_result", tool_use_id: call.id, content: `client-result-${call.id}`,
         })) })
+        if (!mapping) continue
         const state = { ...mapping, lineageHash: mapping.lineageHash ?? "", lastAccess: 0 }
         const nextHistory = [...history, ...suffix]
         const lineage = verifyLineage(state, nextHistory)
@@ -490,7 +508,7 @@ describe("Integration: passthrough early stop", () => {
           expect(edited.prefixOverlap).toBe(earlierAssistant)
         }
       }
-      expect(events.filter(row => row.event === "passthrough.checkpoint_persisted")).toHaveLength(3)
+      expect(events.filter(row => row.event === "passthrough.checkpoint_persisted")).toHaveLength(count === 1 ? 3 : 0)
     })
   }
 
@@ -1271,7 +1289,7 @@ describe("Integration: passthrough early stop", () => {
 
   it("non-stream: drops copied rollback UUIDs after a checkpoint fork", async () => {
     const firstFragment = assistantMessage([
-      { type: "tool_use", id: "undo-parallel-1", name: "read", input: { file_path: "a" } },
+      { type: "text", text: "reading the file" },
     ])
     const finalFragment = assistantMessage([
       { type: "tool_use", id: "undo-parallel-2", name: "read", input: { file_path: "b" } },
@@ -1280,7 +1298,6 @@ describe("Integration: passthrough early stop", () => {
     mockMessages = [
       firstFragment,
       finalFragment,
-      userDenyMessage("undo-parallel-1"),
       userDenyMessage("undo-parallel-2"),
     ]
     expect((await post(app, {
@@ -1302,7 +1319,6 @@ describe("Integration: passthrough early stop", () => {
         { role: "user", content: "read both for undo" },
         { role: "assistant", content: combinedToolTurn },
         { role: "user", content: [
-          { type: "tool_result", tool_use_id: "undo-parallel-1", content: "A" },
           { type: "tool_result", tool_use_id: "undo-parallel-2", content: "B" },
         ] },
       ],
@@ -1322,7 +1338,6 @@ describe("Integration: passthrough early stop", () => {
         { role: "user", content: "read both for undo" },
         { role: "assistant", content: combinedToolTurn },
         { role: "user", content: [
-          { type: "tool_result", tool_use_id: "undo-parallel-1", content: "A" },
           { type: "tool_result", tool_use_id: "undo-parallel-2", content: "B" },
         ] },
         { role: "assistant", content: forkOutput.message.content },
@@ -2010,8 +2025,13 @@ describe("Integration: passthrough early stop", () => {
       ],
     }, "es-late-parallel")
     expect(second.status).toBe(200)
-    expect(capturedQueryParamsAll[1].options.resume).toBe(initialManagedSessionId())
-    expect(capturedQueryParamsAll[1].options.resumeSessionAt).toBe(finalFragment.uuid)
+    expect(capturedQueryParamsAll[1].options.resume).toBeUndefined()
+    expect(capturedQueryParamsAll[1].options.resumeSessionAt).toBeUndefined()
+    const replay = await serializedPrompt(capturedQueryParamsAll[1].prompt)
+    expect(replay).toContain("late-tu-1")
+    expect(replay).toContain("late-tu-2")
+    expect(replay).toContain("A")
+    expect(replay).toContain("B")
   })
 
   // The non-stream counterpart of the late-parallel-metadata case above.
@@ -2075,8 +2095,14 @@ describe("Integration: passthrough early stop", () => {
       ],
     }, "es-ns-late-parallel")
     expect(second.status).toBe(200)
-    expect(capturedQueryParamsAll[1].options.resumeSessionAt).toBe(finalFragment.uuid)
-    expect(capturedQueryParamsAll[1].options.forkSession).toBe(true)
+    expect(capturedQueryParamsAll[1].options.resume).toBeUndefined()
+    expect(capturedQueryParamsAll[1].options.resumeSessionAt).toBeUndefined()
+    expect(capturedQueryParamsAll[1].options.forkSession).toBeUndefined()
+    const replay = await serializedPrompt(capturedQueryParamsAll[1].prompt)
+    expect(replay).toContain("ns-late-1")
+    expect(replay).toContain("ns-late-2")
+    expect(replay).toContain("A")
+    expect(replay).toContain("B")
   })
 
   // The other half of the same gate. Above, the tracker lags the wire; here it
@@ -2544,7 +2570,13 @@ describe("Integration: passthrough early stop", () => {
       ],
     }, "es-unstreamed-parallel")
     expect(second.status).toBe(200)
-    expect(capturedQueryParamsAll[1].options.resumeSessionAt).toBe(toolTurn.uuid)
+    expect(capturedQueryParamsAll[1].options.resume).toBeUndefined()
+    expect(capturedQueryParamsAll[1].options.resumeSessionAt).toBeUndefined()
+    const replay = await serializedPrompt(capturedQueryParamsAll[1].prompt)
+    expect(replay).toContain("unstreamed-parallel-a")
+    expect(replay).toContain("unstreamed-parallel-b")
+    expect(replay).toContain("A")
+    expect(replay).toContain("B")
   })
 
   it("stream: recovers a non-streamed capped call without a checkpoint when no result was delivered", async () => {
@@ -4254,6 +4286,356 @@ describe("Integration: passthrough early stop", () => {
     expect(lookupSharedSession(sessionKey)).toBeUndefined()
   })
 
+  for (const shape of [
+    { stream: true, deferred: false, mixed: true, recoveryDisabled: false },
+    { stream: true, deferred: false, mixed: true, recoveryDisabled: true },
+    { stream: true, deferred: true, mixed: false, recoveryDisabled: false },
+    { stream: true, deferred: true, mixed: true, recoveryDisabled: false },
+    { stream: false, deferred: true, mixed: false, recoveryDisabled: false },
+    { stream: false, deferred: true, mixed: true, recoveryDisabled: false },
+  ]) {
+    it(`rejected parallel checkpoint evicts before ${shape.stream ? "SSE" : "JSON"} terminal (${JSON.stringify(shape)})`, async () => {
+      if (shape.recoveryDisabled) process.env.MERIDIAN_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY = "0"
+      else delete process.env.MERIDIAN_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY
+      const sessionKey = `rejected-parallel-${JSON.stringify(shape)}-${TEST_RUN_ID}`
+      usedSessionKeys.add(sessionKey)
+      const headers = { "x-meridian-agent": "pi", "user-agent": "pi/1.4.0", "x-session-affinity": sessionKey }
+      const calls = [
+        { type: "tool_use", id: "rejected-parallel-a", name: "read", input: { file_path: "/a" } },
+        { type: "tool_use", id: "rejected-parallel-b", name: shape.mixed ? "mcp__oc__read" : "read", input: { file_path: "/b" } },
+      ]
+      const tools = [READ_TOOL, ...(shape.deferred ? [{ name: "lsp_diagnostics", defer_loading: true,
+        input_schema: { type: "object", properties: { file: { type: "string" } } } }] : [])]
+      mockMessages = [
+        messageStart("msg_rejected_parallel"),
+        ...calls.flatMap((call, index) => [toolUseBlockStart(index, call.name, call.id),
+          inputJsonDelta(index, JSON.stringify(call.input)), blockStop(index)]),
+        messageDelta("tool_use"), messageStop(),
+        { ...assistantMessage(calls), test_skip_pre_tool_hook: true },
+        ...(shape.mixed ? [{ type: "test_pre_tool_hook", tool_name: calls[1]!.name,
+          tool_use_id: calls[1]!.id, tool_input: calls[1]!.input }] : []),
+        unavailableToolMessage(calls[0]!.id, calls[0]!.name),
+        shape.mixed ? userDenyMessage(calls[1]!.id) : unavailableToolMessage(calls[1]!.id, calls[1]!.name),
+        ...(shape.deferred ? [
+          messageStart("msg_hidden_digest"), textBlockStart(0), textDelta(0, "hidden digest"), blockStop(0),
+          messageDelta("end_turn"), messageStop(), assistantMessage([{ type: "text", text: "hidden digest" }]),
+          { type: "result", subtype: "success", is_error: false },
+        ] : [{ type: "result", subtype: "error_max_turns", is_error: true }]),
+      ]
+      mockTerminalError = shape.deferred ? undefined
+        : new Error("Claude Code returned an error result: Reached maximum number of turns (1)")
+      const messages = [{ role: "user", content: "read both files" }]
+      const response = await post(app, {
+        model: "opus[1m]", max_tokens: 400, stream: shape.stream, tools, messages,
+      }, "unused", headers)
+      const body = await response.text()
+      expect(response.status).toBe(200)
+      expect(body).not.toContain("event: error")
+      expect(body).not.toContain("hidden digest")
+      expect(body).toContain('"stop_reason":"tool_use"')
+      for (const call of calls) expect(body).toContain(call.id)
+      expect(capturedQueryParamsAll[0].options.maxTurns).toBe(shape.deferred ? 4 : 1)
+      expect(lookupSharedSession(sessionKey)).toBeUndefined()
+
+      mockTerminalError = undefined
+      mockMessages = [assistantMessage([{ type: "text", text: "both files read" }])]
+      const next = await post(app, {
+        model: "opus[1m]", max_tokens: 400, stream: false, tools,
+        messages: [...messages,
+          { role: "assistant", content: calls.map(call => ({ ...call, name: "read" })) },
+          { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
+            content: `REAL_CLIENT_RESULT_${call.id}` })) },
+        ],
+      }, "unused", headers)
+      expect((await next.json()).content).toContainEqual({ type: "text", text: "both files read" })
+      expect(capturedQueryParamsAll).toHaveLength(2)
+      const followUp = capturedQueryParamsAll[1]
+      expect(followUp.options.resume).toBeUndefined()
+      const prompt: unknown[] = []
+      if (typeof followUp.prompt === "string") prompt.push(followUp.prompt)
+      else for await (const row of followUp.prompt) prompt.push(row)
+      const replay = JSON.stringify(prompt)
+      for (const call of calls) {
+        expect(replay).toContain(call.id)
+        expect(replay).toContain(`REAL_CLIENT_RESULT_${call.id}`)
+      }
+      expect(replay).not.toContain("No such tool available")
+    })
+  }
+
+  for (const shape of ["captured", "mixed", "uncaptured", "latched-metadata", "latched-stream", "latched-stream-only", "latched-error"] as const) {
+    it(`publication guard replays SSE ${shape} completion`, async () => {
+      const sessionKey = `publication-${shape}-${TEST_RUN_ID}`
+      usedSessionKeys.add(sessionKey)
+      const headers = { "x-meridian-agent": "pi", "user-agent": "pi/1.4.0", "x-session-affinity": sessionKey }
+      const latched = shape.startsWith("latched")
+      const calls = Array.from({ length: shape === "uncaptured" ? 1 : 2 }, (_, index) => ({
+        type: "tool_use", id: `publication-${index}`, name: "mcp__oc__read", input: { file_path: `/file-${index}` },
+      }))
+      const tools = [READ_TOOL, { name: "lsp_diagnostics", defer_loading: true, input_schema: { type: "object" } }]
+      const hook = (index: number) => ({ type: "test_pre_tool_hook", tool_name: calls[index]!.name,
+        tool_use_id: calls[index]!.id, tool_input: calls[index]!.input })
+      mockMessages = latched ? [
+        messageStart("publication-latched"), toolUseBlockStart(0, calls[0]!.name, calls[0]!.id),
+        inputJsonDelta(0, JSON.stringify(calls[0]!.input)), blockStop(0), messageDelta("tool_use"), messageStop(),
+        assistantMessage([calls[0]!]), userDenyMessage(calls[0]!.id),
+        ...(shape.startsWith("latched-stream") ? [toolUseBlockStart(1, calls[1]!.name, calls[1]!.id),
+          inputJsonDelta(1, JSON.stringify(calls[1]!.input)), blockStop(1)] : []),
+        ...(shape === "latched-stream-only" ? [] : [{ ...assistantMessage([calls[1]!]), test_skip_pre_tool_hook: true }]),
+        unavailableToolMessage(calls[1]!.id, "read"),
+        { type: "result", subtype: shape === "latched-error" ? "error_max_turns" : "success", is_error: shape === "latched-error" },
+      ] : [
+        { ...assistantMessage(calls), test_skip_pre_tool_hook: true },
+        ...(shape === "captured" ? [hook(0), hook(1)] : shape === "mixed" ? [hook(0)] : []),
+        ...calls.map((call, index) => shape === "captured" || (shape === "mixed" && index === 0)
+          ? userDenyMessage(call.id) : unavailableToolMessage(call.id, "read")),
+        { type: "result", subtype: "success", is_error: false },
+      ]
+      mockTerminalError = shape === "latched-error"
+        ? new Error("Claude Code returned an error result: Reached maximum number of turns (1)") : undefined
+      const messages = [{ role: "user", content: "read every file" }]
+      const first = await post(app, { model: "opus[1m]", max_tokens: 400, stream: true, tools, messages }, "unused", headers)
+      const body = await first.text()
+      expect(first.status).toBe(200)
+      expect(body).not.toContain("event: error")
+      const visibleCalls = parseSSE(body).filter(frame => frame.event === "content_block_start")
+        .map(frame => frame.data.content_block)
+        .filter((block): block is { type: "tool_use"; id: string; name: string; input: unknown } =>
+          typeof block === "object" && block !== null && "type" in block && block.type === "tool_use" &&
+          "id" in block && typeof block.id === "string")
+      expect(visibleCalls.map(call => call.id)).toEqual(shape === "captured" ? calls.map(call => call.id)
+        : shape === "uncaptured" ? [] : [calls[0]!.id])
+      if (visibleCalls.length > 0) expect(body).toContain('"stop_reason":"tool_use"')
+      // Do not stop at the mapping assertion: on RED the follow-up itself must
+      // demonstrate that a null checkpoint bypasses the read-side tool guard.
+      const stored = lookupSharedSession(sessionKey)
+      mockTerminalError = undefined
+      mockMessages = [assistantMessage([{ type: "text", text: "all results received" }])]
+      const next = await post(app, { model: "opus[1m]", max_tokens: 400, stream: false, tools,
+        messages: [...messages,
+          { role: "assistant", content: visibleCalls.length ? visibleCalls : [{ type: "text", text: "continue" }] },
+          { role: "user", content: visibleCalls.length ? visibleCalls.map(call => ({ type: "tool_result",
+            tool_use_id: call.id, content: `REAL_CLIENT_RESULT_${call.id}` })) : "continue" },
+        ],
+      }, "unused", headers)
+      expect((await next.json()).content).toContainEqual({ type: "text", text: "all results received" })
+      expect(capturedQueryParamsAll).toHaveLength(2)
+      expect(capturedQueryParamsAll[1].options.resume).toBeUndefined()
+      expect(stored).toBeUndefined()
+      const replay = await serializedPrompt(capturedQueryParamsAll[1].prompt)
+      for (const call of visibleCalls) expect(replay.split(`REAL_CLIENT_RESULT_${call.id}`)).toHaveLength(2)
+    })
+  }
+
+  for (const stream of [true, false]) for (const capped of [true, false]) for (const count of [1, 2, 3]) {
+    it(`all-captured checkpoint ${count === 1 ? "retains" : "replays"} (${JSON.stringify({ stream, capped, count })})`, async () => {
+      const sessionKey = `all-captured-${stream}-${capped}-${count}-${TEST_RUN_ID}`
+      usedSessionKeys.add(sessionKey)
+      const headers = { "x-meridian-agent": "pi", "user-agent": "pi/1.4.0", "x-session-affinity": sessionKey }
+      const calls = Array.from({ length: count }, (_, index) => ({
+        type: "tool_use", id: `captured-${index}`, name: "mcp__oc__read", input: { file_path: `/file-${index}` },
+      }))
+      const tools = [READ_TOOL, ...(!capped ? [{ name: "lsp_diagnostics", defer_loading: true,
+        input_schema: { type: "object", properties: { file: { type: "string" } } } }] : [])]
+      const boundary = assistantMessage(calls)
+      mockMessages = [
+        messageStart("msg_all_captured"),
+        ...calls.flatMap((call, index) => [toolUseBlockStart(index, call.name, call.id),
+          inputJsonDelta(index, JSON.stringify(call.input)), blockStop(index)]),
+        messageDelta("tool_use"), messageStop(), boundary,
+        ...calls.map(call => userDenyMessage(call.id)),
+        { type: "result", subtype: capped ? "error_max_turns" : "success", is_error: capped },
+      ]
+      mockTerminalError = capped
+        ? new Error("Claude Code returned an error result: Reached maximum number of turns (1)") : undefined
+      const messages = [{ role: "user", content: "read every file" }]
+      const first = await post(app, {
+        model: "opus[1m]", max_tokens: 400, stream, tools, messages,
+      }, "unused", headers)
+      const body = await first.text()
+      expect(first.status).toBe(200)
+      expect(body).not.toContain("event: error")
+      expect(body).toContain('"stop_reason":"tool_use"')
+      for (const call of calls) expect(body).toContain(call.id)
+      expect(capturedQueryParamsAll[0].options.maxTurns).toBe(capped ? 1 : 4)
+      if (count === 1) expect(lookupSharedSession(sessionKey)?.passthroughToolCallIds).toEqual([calls[0]!.id])
+      else expect(lookupSharedSession(sessionKey)).toBeUndefined()
+
+      mockTerminalError = undefined
+      mockMessages = [assistantMessage([{ type: "text", text: "all files read" }])]
+      const next = await post(app, {
+        model: "opus[1m]", max_tokens: 400, stream: false, tools,
+        messages: [...messages,
+          { role: "assistant", content: calls.map(call => ({ ...call, name: "read" })) },
+          { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
+            content: `REAL_CLIENT_RESULT_${call.id}` })) },
+        ],
+      }, "unused", headers)
+      expect((await next.json()).content).toContainEqual({ type: "text", text: "all files read" })
+      expect(capturedQueryParamsAll).toHaveLength(2)
+      const followUp = capturedQueryParamsAll[1]
+      if (count === 1) {
+        expect(followUp.options.resume).toBe(initialManagedSessionId())
+        expect(followUp.options.resumeSessionAt).toBe(boundary.uuid)
+      } else {
+        expect(followUp.options.resume).toBeUndefined()
+        expect(followUp.options.resumeSessionAt).toBeUndefined()
+      }
+      const prompt: unknown[] = []
+      if (typeof followUp.prompt === "string") prompt.push(followUp.prompt)
+      else for await (const row of followUp.prompt) prompt.push(row)
+      const replay = JSON.stringify(prompt)
+      for (const call of calls) {
+        expect(replay).toContain(call.id)
+        expect(replay.split(`REAL_CLIENT_RESULT_${call.id}`)).toHaveLength(2)
+      }
+      expect(replay).not.toContain("forwarded to client")
+      expect(replay).not.toContain("Tool result missing due to internal error")
+    })
+  }
+
+  for (const count of [2, 3]) {
+    it(`replays a legacy retained ${count}-call checkpoint instead of resuming it`, async () => {
+      const sessionKey = `legacy-captured-${count}-${TEST_RUN_ID}`
+      usedSessionKeys.add(sessionKey)
+      const headers = { "x-meridian-agent": "pi", "user-agent": "pi/1.4.0", "x-session-affinity": sessionKey }
+      const { computeLineageHash, computeMessageHashes } = await import("../proxy/session/lineage")
+      const history = [{ role: "user", content: "read all legacy files" }]
+      const calls = Array.from({ length: count }, (_, index) => ({
+        type: "tool_use", id: `legacy-${index}`, name: "read", input: { file_path: `/file-${index}` },
+      }))
+      expect(await storeSharedSession(sessionKey, "legacy-captured-session", history.length,
+        computeLineageHash(history), computeMessageHashes(history), undefined, undefined, undefined,
+        "legacy-assistant-uuid", calls.map(call => call.id))).toBeTruthy()
+      mockMessages = [assistantMessage([{ type: "text", text: "legacy results read" }])]
+      const response = await post(app, {
+        model: "opus[1m]", max_tokens: 400, stream: false, tools: [READ_TOOL],
+        messages: [...history, { role: "assistant", content: calls },
+          { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
+            content: `REAL_CLIENT_RESULT_${call.id}` })) }],
+      }, "unused", headers)
+      expect(response.status).toBe(200)
+      expect((await response.json()).content).toContainEqual({ type: "text", text: "legacy results read" })
+      expect(capturedQueryParams.options.resume).toBeUndefined()
+      expect(capturedQueryParams.options.resumeSessionAt).toBeUndefined()
+      const replay = await serializedPrompt(capturedQueryParams.prompt)
+      for (const call of calls) {
+        expect(replay).toContain(call.id)
+        expect(replay.split(`REAL_CLIENT_RESULT_${call.id}`)).toHaveLength(2)
+      }
+    })
+  }
+
+  // Uncaptured calls must fail closed regardless of the CLI refusal wording.
+  for (const shape of [
+    { stream: true, deferred: false, mixed: true, inputRejected: true, single: false },
+    { stream: false, deferred: false, mixed: true, inputRejected: true, single: false },
+    { stream: false, deferred: false, mixed: true, inputRejected: false, single: false },
+    ...[true, false].flatMap(stream => [
+      { stream, deferred: true, mixed: true, inputRejected: true, single: false },
+      { stream, deferred: true, mixed: false, inputRejected: true, single: false },
+      { stream, deferred: true, mixed: false, inputRejected: true, single: true },
+    ]),
+  ]) {
+    it(`capture proof evicts before ${shape.stream ? "SSE" : "JSON"} terminal (${JSON.stringify(shape)})`, async () => {
+      delete process.env.MERIDIAN_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY
+      const sessionKey = `capture-proof-${JSON.stringify(shape)}-${TEST_RUN_ID}`
+      usedSessionKeys.add(sessionKey)
+      const headers = { "x-meridian-agent": "pi", "user-agent": "pi/1.4.0", "x-session-affinity": sessionKey }
+      const calls = [
+        { type: "tool_use", id: "rejected-parallel-a", name: shape.inputRejected ? "mcp__oc__read" : "read", input: { file_path: "/a" } },
+        { type: "tool_use", id: "rejected-parallel-b", name: shape.mixed || shape.inputRejected ? "mcp__oc__read" : "read", input: { file_path: "/b" } },
+      ].slice(0, shape.single ? 1 : 2)
+      const reject = (call: typeof calls[number]) => shape.inputRejected
+        ? { ...userDenyMessage(call.id), message: { role: "user", content: [{ type: "tool_result",
+          tool_use_id: call.id, is_error: true,
+          content: `<tool_use_error>InputValidationError: ${call.name} was called with input that could not be parsed as JSON.\nInvalid JSON.</tool_use_error>` }] } }
+        : unavailableToolMessage(call.id, call.name)
+      const tools = [READ_TOOL, ...(shape.deferred ? [{ name: "lsp_diagnostics", defer_loading: true,
+        input_schema: { type: "object", properties: { file: { type: "string" } } } }] : [])]
+      mockMessages = [
+        messageStart("msg_rejected_parallel"),
+        ...calls.flatMap((call, index) => [toolUseBlockStart(index, call.name, call.id),
+          inputJsonDelta(index, JSON.stringify(call.input)), blockStop(index)]),
+        messageDelta("tool_use"), messageStop(),
+        { ...assistantMessage(calls), test_skip_pre_tool_hook: true },
+        ...(shape.mixed ? [{ type: "test_pre_tool_hook", tool_name: calls[1]!.name,
+          tool_use_id: calls[1]!.id, tool_input: calls[1]!.input }] : []),
+        reject(calls[0]!),
+        ...(!shape.single ? [shape.mixed ? userDenyMessage(calls[1]!.id) : reject(calls[1]!)] : []),
+        ...(shape.deferred ? [
+          messageStart("msg_hidden_digest"), textBlockStart(0), textDelta(0, "hidden digest"), blockStop(0),
+          messageDelta("end_turn"), messageStop(), assistantMessage([{ type: "text", text: "hidden digest" }]),
+          { type: "result", subtype: "success", is_error: false },
+        ] : [{ type: "result", subtype: "error_max_turns", is_error: true }]),
+      ]
+      mockTerminalError = shape.deferred ? undefined
+        : new Error("Claude Code returned an error result: Reached maximum number of turns (1)")
+      const messages = [{ role: "user", content: "read both files" }]
+      const response = await post(app, {
+        model: "opus[1m]", max_tokens: 400, stream: shape.stream, tools, messages,
+      }, "unused", headers)
+      const body = await response.text()
+      expect(response.status).toBe(200)
+      expect(body).not.toContain("event: error")
+      expect(body).not.toContain("hidden digest")
+      expect(body).toContain('"stop_reason":"tool_use"')
+      for (const call of calls) expect(body).toContain(call.id)
+      expect(capturedQueryParamsAll[0].options.maxTurns).toBe(shape.deferred ? 4 : 1)
+      expect(lookupSharedSession(sessionKey)).toBeUndefined()
+
+      mockTerminalError = undefined
+      mockMessages = [assistantMessage([{ type: "text", text: "both files read" }])]
+      const next = await post(app, {
+        model: "opus[1m]", max_tokens: 400, stream: false, tools,
+        messages: [...messages,
+          { role: "assistant", content: calls.map(call => ({ ...call, name: "read" })) },
+          { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
+            content: `REAL_CLIENT_RESULT_${call.id}` })) },
+        ],
+      }, "unused", headers)
+      expect((await next.json()).content).toContainEqual({ type: "text", text: "both files read" })
+      expect(capturedQueryParamsAll).toHaveLength(2)
+      const followUp = capturedQueryParamsAll[1]
+      expect(followUp.options.resume).toBeUndefined()
+      const prompt: unknown[] = []
+      if (typeof followUp.prompt === "string") prompt.push(followUp.prompt)
+      else for await (const row of followUp.prompt) prompt.push(row)
+      const replay = JSON.stringify(prompt)
+      for (const call of calls) {
+        expect(replay).toContain(call.id)
+        expect(replay).toContain(`REAL_CLIENT_RESULT_${call.id}`)
+      }
+      expect(replay).not.toContain("No such tool available")
+    })
+  }
+
+  it("non-stream: late uncaptured assistant fragments cannot hide behind a captured checkpoint without boundary events", async () => {
+    const sessionKey = `capture-proof-no-boundaries-${TEST_RUN_ID}`
+    usedSessionKeys.add(sessionKey)
+    const headers = { "x-meridian-agent": "pi", "user-agent": "pi/1.4.0", "x-session-affinity": sessionKey }
+    const captured = { type: "tool_use", id: "first-captured", name: "mcp__oc__read", input: { file_path: "/a" } }
+    const rejected = { type: "tool_use", id: "late-uncaptured", name: "read", input: { file_path: "/b" } }
+    mockMessages = [
+      assistantMessage([captured]), userDenyMessage(captured.id),
+      { ...assistantMessage([rejected]), test_skip_pre_tool_hook: true },
+      unavailableToolMessage(rejected.id, rejected.name),
+      { type: "result", subtype: "success", is_error: false },
+    ]
+    const response = await post(app, {
+      model: "opus[1m]", max_tokens: 400, stream: false,
+      tools: [READ_TOOL, { name: "lsp_diagnostics", defer_loading: true, input_schema: { type: "object" } }],
+      messages: [{ role: "user", content: "read both files" }],
+    }, "unused", headers)
+    const body = await response.json()
+    expect(response.status).toBe(200)
+    expect(body.stop_reason).toBe("tool_use")
+    expect(body.content).toContainEqual({ ...captured, name: "read" })
+    expect(capturedQueryParamsAll[0].options.includePartialMessages).toBe(true)
+    expect(capturedQueryParamsAll[0].options.maxTurns).toBe(4)
+    expect(lookupSharedSession(sessionKey)).toBeUndefined()
+  })
+
   it("stream: headerless Pi continues an unavailable tool without inheriting another loop", async () => {
     delete process.env.MERIDIAN_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY
     const pi = { "x-meridian-agent": "pi", "user-agent": "pi/0.85.0" }
@@ -4740,7 +5122,7 @@ describe("Integration: passthrough early stop", () => {
 
   // A batch where the hook captured one call is the captured recovery's, with
   // or without #1364: both blocks already streamed, so the client gets both
-  // and answers the invented one itself.
+  // and answers the invented one itself. Its mixed checkpoint must be evicted.
   it("stream: a captured call beside a rejected undeclared call hands over both", async () => {
     delete process.env.MERIDIAN_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY
     const sessionHeader = "es-undeclared-beside-captured"
@@ -4768,8 +5150,36 @@ describe("Integration: passthrough early stop", () => {
     expect(events.filter(e => e.event === "error")).toHaveLength(0)
     expect(streamedToolCalls(events)).toEqual(["toolu_real:bash", "toolu_invented:bash_placeholder"])
     expect(stopReasons(events)).toEqual(["tool_use"])
-    expect(lookupSharedSession(`${sessionHeader}-${TEST_RUN_ID}`)?.passthroughToolCallIds)
-      .toEqual(["toolu_real", "toolu_invented"])
+    expect(lookupSharedSession(`${sessionHeader}-${TEST_RUN_ID}`)).toBeUndefined()
+
+    mockTerminalError = undefined
+    mockMessages = [assistantMessage([{ type: "text", text: "results received" }])]
+    const next = await post(app, {
+      model: "claude-sonnet-4-5", max_tokens: 400, stream: false, tools: [BASH_TOOL],
+      messages: [
+        { role: "user", content: "list the files" },
+        { role: "assistant", content: [
+          { type: "tool_use", id: "toolu_real", name: "bash", input: { command: "ls" } },
+          { type: "tool_use", id: "toolu_invented", name: "bash_placeholder", input: { command: "ls" } },
+        ] },
+        { role: "user", content: [
+          { type: "tool_result", tool_use_id: "toolu_real", content: "REAL_DIRECTORY_LISTING" },
+          { type: "tool_result", tool_use_id: "toolu_invented", content: "REAL_CLIENT_INVALID_TOOL", is_error: true },
+        ] },
+      ],
+    }, sessionHeader)
+    expect(next.status).toBe(200)
+    await next.text()
+    expect(capturedQueryParamsAll).toHaveLength(2)
+    const followUp = capturedQueryParamsAll[1]
+    expect(followUp.options.resume).toBeUndefined()
+    const prompt: unknown[] = []
+    if (typeof followUp.prompt === "string") prompt.push(followUp.prompt)
+    else for await (const row of followUp.prompt) prompt.push(row)
+    const replay = JSON.stringify(prompt)
+    expect(replay).toContain("REAL_DIRECTORY_LISTING")
+    expect(replay).toContain("REAL_CLIENT_INVALID_TOOL")
+    expect(replay).not.toContain("No such tool available")
   })
 
   // A name under another MCP server's prefix is hidden from the client as an
@@ -5307,7 +5717,7 @@ describe("Integration: passthrough early stop", () => {
     expect(promptMessages[0].message.content.map((b: any) => [b.type, b.tool_use_id])).toEqual([["tool_result", "tu1"]])
   })
 
-  it("non-stream: a session-keyed chat completions turn answering two parallel tool calls resumes at the checkpoint", async () => {
+  it("non-stream: a session-keyed chat completions turn answering two parallel tool calls replays every result", async () => {
     const sessionKey = `es-openai-keyed-parallel-${TEST_RUN_ID}`
     usedSessionKeys.add(sessionKey)
     const headers = {
@@ -5335,10 +5745,9 @@ describe("Integration: passthrough early stop", () => {
     const firstBody = await first.json() as any
     expect(firstBody.choices[0].finish_reason).toBe("tool_calls")
     expect(firstBody.choices[0].message.tool_calls).toHaveLength(2)
-    expect(lookupSharedSession(sessionKey)?.claudeSessionId).toBe(initialManagedSessionId())
+    expect(lookupSharedSession(sessionKey)).toBeUndefined()
 
-    // OpenAI carries one `tool` message per call; both must land in one
-    // user turn or the checkpoint continuation refuses the split batch.
+    // OpenAI carries one `tool` message per call; replay must preserve both.
     mockMessages = [assistantMessage([{ type: "text", text: "x says hi, y says ho" }])]
     const second = await postChat({
       messages: [
@@ -5352,14 +5761,13 @@ describe("Integration: passthrough early stop", () => {
       ],
     })
     expect(second.status).toBe(200)
-    expect(capturedQueryParams.options.resume).toBe(initialManagedSessionId())
-    expect(capturedQueryParams.options.resumeSessionAt).toBe(assistantToolTurn.uuid)
-    const promptMessages: any[] = []
-    for await (const message of capturedQueryParams.prompt) promptMessages.push(message)
-    expect(promptMessages).toHaveLength(1)
-    expect(promptMessages[0].type).toBe("user")
-    expect(promptMessages[0].message.content.map((b: any) => [b.type, b.tool_use_id]))
-      .toEqual([["tool_result", "tu1"], ["tool_result", "tu2"]])
+    expect(capturedQueryParams.options.resume).toBeUndefined()
+    expect(capturedQueryParams.options.resumeSessionAt).toBeUndefined()
+    const replay = await serializedPrompt(capturedQueryParams.prompt)
+    expect(replay).toContain("tu1")
+    expect(replay).toContain("tu2")
+    expect(replay).toContain("hi")
+    expect(replay).toContain("ho")
   })
 
   it("stream: a session-keyed chat completions tool turn stores the checkpoint and the next turn resumes it", async () => {

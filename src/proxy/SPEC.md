@@ -121,14 +121,51 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   client, an id/name-matched CLI name-dispatch refusal for that call, no
   dropped calls, and the ordinary settled assistant UUID/full-call-set and
   publication guards. Resume rewinds before the rejection and appends the
-  real client result. Two or more rejected calls in the same assistant turn
-  are evicted: resuming them drops the client's real tool results, and
-  delivering those results on a multi-call resume is an open item
-  (`docs/maintenance/FRESH_REPLAY_CHECKPOINT.md`). Abort-window calls without
-  a result, malformed-input refusals, undeclared names, unkeyed requests and
-  larger turn budgets keep the existing eviction behavior. Retained
-  checkpoints use ordinary continuation tool caching; the one-shot recovery
-  tool grant remains only for evicted checkpoints.
+  real client result. All other checkpoint retention requires positive
+  PreToolUse capture proof for every call ID, on JSON completion, SSE
+  completion and captured-error recovery. An uncaptured call evicts the
+  checkpoint regardless of the CLI refusal wording or call count, including
+  InputValidationError and single-call deferred completion. The canonical
+  single-call name-dispatch exception above is unchanged. JSON also checks
+  all emitted assistant and streamed call IDs independently of its frozen
+  candidate: without boundary events, a later fragment must not hide an
+  uncaptured call behind an earlier captured call.
+  **Multi-call checkpoints always replay, including all-captured batches**
+  (operator-approved fallback, 2026-11-14). Real SDK 0.2.141 / CLI 2.1.322
+  resumes lose later real results even when every call reached PreToolUse and
+  one SDK input contains every native result. Order/grouping, hook-delay and
+  earlier-fragment probes did not establish a safe resume shape; the internal
+  CLI cause remains unproven. A durable assistant boundary and capture proof
+  therefore do not prove result delivery. JSON completion, SSE completion
+  (including assistant-only/unstreamed output), captured-error recovery and
+  silent-turn recovery must evict multi-call checkpoints; a previously retained
+  multi-call checkpoint also takes fresh full replay on read.
+  Publication uses the shared `checkpointPublicationRequiresReplay` invariant:
+  a tool turn requires a canonical settled assistant UUID and an exact match
+  between its checkpoint IDs and the client-visible batch, with exactly one
+  captured call. SSE computes that batch from both streamed IDs and captured
+  calls queued for the final envelope, not only partial stream events. An
+  assistant-only batch can settle at publication after canonical drain; a
+  captured single call still retains its rewind checkpoint. Any uncaptured
+  assistant or wire call observed during drain invalidates publication even
+  after the candidate latches, including suppressed wire-only fragments without
+  assistant metadata. Cardinality applies to the client-visible batch, not
+  hidden captured digest metadata pruned from that batch. JSON uses the same
+  rule with its completed response blocks. Silent recovery must win either
+  publication of its eligible fork or exact-generation mapping invalidation
+  before releasing buffered recovery content; invalidated forks are abandoned,
+  and a CAS loser withholds its calls. Plain text and captured single-call
+  retention remain unchanged, as does the canonical single-call name-dispatch
+  exception (which supplies only that call's otherwise missing capture proof).
+  Fresh replay preserves all real
+  client results at the cost of rebuilding the SDK prefix/cache and losing
+  SDK-only context not present in client history. See
+  `docs/maintenance/MIXED_REJECTION_CHECKPOINT.md` for red/green evidence and
+  cache-cost bounds; native multi-call resume remains unqualified. Abort-window
+  calls without a result, malformed-input refusals, undeclared names, unkeyed requests and
+  larger turn budgets remain ineligible for this rejection-only recovery
+  retention. Retained checkpoints use ordinary continuation tool caching; the
+  one-shot recovery tool grant remains only for evicted checkpoints.
 - **Passthrough tool sets are shared by content, never by lifetime.** Sessions
   sending identical tools share one built definition set (#1410) and one raw
   tool list (#1444), found through process-wide indexes keyed by a digest of

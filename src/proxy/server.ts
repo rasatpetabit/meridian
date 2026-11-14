@@ -105,7 +105,7 @@ import { describeLocalBootIdentity } from "./session/processIncarnation"
 import { openCodePrimaryAgentContextHash, requiresOpenCodeAgentReplay } from "./adapters/opencodeAgentContext"
 import { getOpenCodeSourceFeatureOverrides } from "./adapters/opencodeSourceFeatures"
 import { detectServerTools, serverToolErrorMessage } from "./tools"
-import { clientAbortDisposition, coalesceCompleteToolResultContinuation, createEarlyStopTracker, isClientForwardedToolUse, noteAssistantMessage, noteUserContent, settledToolCallAssistantUuid, settlesCheckpointThenContinues, shouldEarlyStop, trackerCoversStreamedCalls } from "./passthroughEarlyStop"
+import { checkpointPublicationRequiresReplay, clientAbortDisposition, coalesceCompleteToolResultContinuation, createEarlyStopTracker, isClientForwardedToolUse, noteAssistantMessage, noteUserContent, settledToolCallAssistantUuid, settlesCheckpointThenContinues, shouldEarlyStop, trackerCoversStreamedCalls } from "./passthroughEarlyStop"
 import { checkEmptyToolInputs, checkUndeliveredToolUses, type EnvelopeViolation } from "./envelopeIntegrity"
 import { classifyTurnOutcome, createRecoveryLifter, hasTruncatableText, shouldAttemptRecovery, shouldInjectSilentTurn, SILENT_TURN_NUDGE } from "./turnOutcome"
 import { resolveAgentAlias } from "./agentMatch"
@@ -3928,6 +3928,17 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
         messagesToConvert = executionMessages
       }
 
+      if (passthroughToolCallAssistantUuid && (passthroughToolCallIds?.length ?? 0) > 1) {
+        claudeLog("passthrough.checkpoint_replay", {
+          expectedToolIds: passthroughToolCallIds?.length,
+          reason: "multi_call_results_unproved",
+        })
+        isResume = false
+        resumeSessionId = undefined
+        passthroughToolCallAssistantUuid = undefined
+        messagesToConvert = executionMessages
+      }
+
       if (passthroughToolCallAssistantUuid) {
         // Rewinding to a tool-use checkpoint is valid only when the immediate
         // delta settles that exact batch. Coalesce any subsequent queued user
@@ -4403,6 +4414,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
       // and store the earlier assistant UUID only after the drain completes.
       const earlyStopEnabled = passthrough && process.env.MERIDIAN_PASSTHROUGH_EARLY_STOP !== "0"
       const earlyStop = createEarlyStopTracker()
+      const cliUnavailableToolIds = new Set<string>()
       let earlyStopFired = false
       // Deny-hold: the CLI dispatches each tool's PreToolUse hook AS SOON AS
       // that block finishes streaming — while later parallel blocks are still
@@ -4888,6 +4900,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
           // checkpoint can freeze on the fragments consumed so far and silently
           // drop the rest from the client-facing set.
           const streamedToolUseIds = new Set<string>()
+          const emittedToolUseIds = new Set<string>()
           let nextPassthroughToolCallAssistantUuid: string | undefined
           let nextPassthroughToolCallIds: string[] | undefined
           let sawCanonicalResult = false
@@ -5272,9 +5285,19 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 claudeLog("passthrough.loop_break", { mode: "non_stream", assistantMessages, captured: capturedToolUses.length })
                 break
               }
+              if (passthrough && message.type === "user") {
+                for (const { id } of cliRejectedToolResults(message.message.content, true)) {
+                  cliUnavailableToolIds.add(id)
+                }
+              }
               // Checkpoint settlement: the deny tool_results identify when all
               // visible calls have been handled. Freeze that assistant boundary,
               // then keep draining; iterator observation alone is not durable.
+              if (passthrough && message.type === "assistant") {
+                for (const block of message.message.content) {
+                  if (isClientForwardedToolUse(block, clientToolPrefix, clientToolSearch)) emittedToolUseIds.add(block.id)
+                }
+              }
               let assistantAddedForwardedCall = false
               if (
                 passthrough &&
@@ -5790,8 +5813,13 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
           // this store only after the iterator drains to its canonical terminal
           // result, which gives the CLI time to persist the assistant boundary.
               if (currentSessionId && !isIndependentSession && !sawDuplicateToolUse) {
-                const checkpointTurn = passthrough && contentBlocks.some((b) => b.type === "tool_use")
-                if (checkpointTurn && (!earlyStopFired || !sawCanonicalResult)) {
+                if (passthrough && checkpointPublicationRequiresReplay({
+                  clientToolCallIds: contentBlocks.flatMap(block => block.type === "tool_use" && typeof block.id === "string" ? [block.id] : []),
+                  checkpointToolCallIds: nextPassthroughToolCallIds,
+                  observedToolCallIds: [...emittedToolUseIds, ...streamedToolUseIds],
+                  forwardedToolUseIds,
+                  checkpointReady: earlyStopFired && sawCanonicalResult && Boolean(nextPassthroughToolCallAssistantUuid),
+                })) {
                   // Iterator visibility is not durability. Never publish a
                   // resumeSessionAt UUID unless the CLI reached its terminal
                   // result and had a chance to commit the transcript.
@@ -6051,6 +6079,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
             let currentClientAssistantUuid: string | null = null
 
             let messageStartEmitted = false
+            const observedToolUseIds = new Set<string>()
             // Claude Code re-sends a turn without streaming when its stream fails
             // before message_start (a burst rate_limit_error does this). Such a
             // turn arrives only as assistant messages, never as stream events, so
@@ -6082,7 +6111,6 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
             const trackUncapturedTools = uncapturedRecoverySetting !== "0"
             const streamedToolBlockRecords = new Map<number, StreamedToolBlockRecord>()
             const cliRejectedToolNames = new Map<string, string>()
-            const cliUnavailableToolIds = new Set<string>()
             // Silent-turn recovery state (see turnOutcome.ts). Kill switch:
             // MERIDIAN_SILENT_TURN_RECOVERY=0 leaves the detection and the
             // telemetry in place and skips only the extra model turn — so an
@@ -6413,6 +6441,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 capturedToolNames.clear()
                 droppedToolUseIds.clear()
                 forwardedToolUseIds.clear()
+                observedToolUseIds.clear()
                 sawDuplicateToolUse = false
                 earlyStop.expected.clear()
                 earlyStop.resolved.clear()
@@ -6794,6 +6823,11 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                       : returnedSessionId
                     validateManagedForkResult(returnedSessionId)
                   }
+                  if (passthrough && message.type === "assistant") {
+                    for (const block of message.message.content) {
+                      if (isClientForwardedToolUse(block, clientToolPrefix, clientToolSearch)) observedToolUseIds.add(block.id)
+                    }
+                  }
                   let assistantAddedForwardedCall = false
                   if (earlyStopEnabled && message.type === "assistant" && !earlyStopFired) {
                     const expectedBefore = earlyStop.expected.size
@@ -6802,9 +6836,11 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                   } else if (earlyStopEnabled && message.type === "user" && !earlyStopFired) {
                     noteUserContent(earlyStop, (message as any).message?.content)
                   }
-                  if (trackUncapturedTools && message.type === "user") {
-                    for (const { id, name } of cliRejectedToolResults(message.message.content)) {
-                      cliRejectedToolNames.set(id, resolveClientToolName(name, passthroughMcp?.clientNameByAlias, passthroughMcpName))
+                  if (passthrough && message.type === "user") {
+                    if (trackUncapturedTools) {
+                      for (const { id, name } of cliRejectedToolResults(message.message.content)) {
+                        cliRejectedToolNames.set(id, resolveClientToolName(name, passthroughMcp?.clientNameByAlias, passthroughMcpName))
+                      }
                     }
                     for (const { id } of cliRejectedToolResults(message.message.content, true)) {
                       cliUnavailableToolIds.add(id)
@@ -6855,6 +6891,10 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                   }
 
                   if (message.type === "stream_event") {
+                    if (passthrough && message.event.type === "content_block_start" &&
+                      isClientForwardedToolUse(message.event.content_block, clientToolPrefix, clientToolSearch)) {
+                      observedToolUseIds.add(message.event.content_block.id)
+                    }
                     // Once turn 1 is closed to the client, all later wire events
                     // belong to the hidden digest. Ignore them wholesale so a
                     // closed-controller enqueue cannot break the durability
@@ -7306,10 +7346,24 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               // yielded before their durable transcript records are committed, so a tool turn
               // also requires both a valid assistant checkpoint and SDK result.
               if (currentSessionId && !isIndependentSession && !sawDuplicateToolUse) {
-                const checkpointTurn = passthrough && streamedToolUseIds.size > 0
+                const clientToolCallIds = new Set([
+                  ...streamedToolUseIds,
+                  ...capturedToolUses.map(tool => tool.id),
+                ])
+                if (passthrough && earlyStopEnabled && !earlyStopFired &&
+                  streamEventsSeen === 0 && unstreamedAssistants.length > 0 &&
+                  trackerCoversStreamedCalls(earlyStop, clientToolCallIds) && shouldEarlyStop(earlyStop)) {
+                  freezeEarlyStopCheckpoint()
+                }
                 if (
                   exitedBeforeCanonicalTerminal ||
-                  (checkpointTurn && (!earlyStopFired || !sawCanonicalResult))
+                  (passthrough && checkpointPublicationRequiresReplay({
+                    clientToolCallIds,
+                    checkpointToolCallIds: nextPassthroughToolCallIds,
+                    observedToolCallIds: [...observedToolUseIds, ...streamedToolUseIds],
+                    forwardedToolUseIds,
+                    checkpointReady: earlyStopFired && sawCanonicalResult && Boolean(nextPassthroughToolCallAssistantUuid),
+                  }))
                 ) {
                   const evicted = await evictSession(
                     profileSessionId,
@@ -7479,10 +7533,8 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                   sdkSessionId: currentSessionId || resumeSessionId,
                 })
                 const recoveryLifter = createRecoveryLifter(() => nextClientBlockIndex++)
-                // Recovery output is provisional until its exact fork wins the
-                // durable mapping CAS. Buffer it so a losing or failed
-                // publication cannot expose an answer that no later turn can
-                // resume.
+                // Buffer recovery output until publication or replay invalidation
+                // wins its exact mapping CAS; a losing attempt exposes nothing.
                 const recoveryLiftedFrames: Array<NonNullable<ReturnType<typeof recoveryLifter.lift>>> = []
                 // The fork's identity. Without capturing it the recovered answer
                 // lives only in a session nothing points at: storeSession has
@@ -7500,6 +7552,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 let recoveryForkSource: TranscriptLocator | undefined
                 let recoveryForkTarget: TranscriptLocator | undefined
                 let recoveryForkPublished = false
+                let recoveryReplayReady = false
                 let recoveryCompleted = false
                 let releaseRecoveryForkPins: (() => void) | undefined
                 let unexpectedRecoveryFork: TranscriptLocator | undefined
@@ -7674,8 +7727,8 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 if (!silentTurnRecovered && recoveryCapturedToolUses.length > 0) {
                   capturedToolUses.splice(capturedBeforeRecovery)
                 }
-                // Point the client's session at the fork, so the turn that
-                // actually answered is the one the next request resumes. The
+                // Retain eligible single-call/text forks; otherwise invalidate
+                // before emitting recovery calls so the next turn replays. The
                 // uuid map is reset rather than carried: those uuids belong to
                 // the pre-fork session and would not resolve against the fork,
                 // so undo falls back to a full replay — correct, just less
@@ -7684,82 +7737,96 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                   recoveryCompleted && silentTurnRecovered && recoverySessionId &&
                   !isIndependentSession && !sawDuplicateToolUse
                 ) {
-                  const recoverySdkUuidMap = allMessages.map(() => null)
-                  if (!bookkeepingHandle) await commitFork(recoveryForkTarget, admissionLifecycleOptions)
-                  assertDurableWritesAllowed()
-                  const recoveryMappingStored = await publishPinnedTranscript(
-                    recoveryForkTarget,
-                    () => {
-                      assertDurableWritesAllowed()
-                      return mapStoreMutation(storeSession(
-                        profileSessionId,
-                        lineageMessages,
-                        recoverySessionId!,
-                        profileScopedCwd,
-                        recoverySdkUuidMap,
-                        lastUsage,
-                        recoveryToolCallAssistantUuid ?? null,
-                        recoveryToolCallAssistantUuid ? [...recoveryEarlyStop.expected] : null,
-                        recoveryForkTarget,
-                        recoveryForkSource,
-                        mappingExpectedGeneration,
-                        options.priorityPublication,
-                        !executionHistory.changed,
-                        resumeContextHash,
-                        assertDurableWritesAllowed,
-                      ), stored => {
-                        // JSON cancellation shares this request queue; SQL flags wait for COMMIT below.
-                        if (stored && !bookkeepingHandle) {
-                          mappingExpectedGeneration = stored
-                          recoveryForkPublished = true
-                          recoveryPublishedTarget = recoveryForkTarget
-                        }
-                        return stored
-                      })
-                    },
-                    admissionLifecycleOptions,
-                  )
-                  if (recoveryMappingStored) {
-                    mappingExpectedGeneration = recoveryMappingStored
-                    recoveryForkPublished = true
-                    recoveryPublishedTarget = recoveryForkTarget
-                  }
-                  if (requestAbort.controller.signal.aborted || durableWritesRevoked) {
-                    if (
-                      recoveryMappingStored && !isIndependentSession &&
-                      !(await evictSession(profileSessionId, profileScopedCwd, lineageMessages, mappingExpectedGeneration))
-                    ) {
-                      throw new Error("Shared session mapping changed after canceled silent-recovery publication")
+                  const recoveryRequiresReplay = checkpointPublicationRequiresReplay({
+                    clientToolCallIds: recoveryCapturedToolUses.map(tool => tool.id),
+                    checkpointToolCallIds: recoveryEarlyStop.expected,
+                    observedToolCallIds: [...recoveryEarlyStop.expected, ...recoveryStreamedToolUseIds],
+                    forwardedToolUseIds,
+                    checkpointReady: recoveryDurable && Boolean(recoveryToolCallAssistantUuid),
+                  })
+                  if (recoveryRequiresReplay) {
+                    if (!(await evictSession(profileSessionId, profileScopedCwd, lineageMessages, mappingExpectedGeneration))) {
+                      throw new Error("Shared session mapping changed before silent recovery invalidation")
                     }
-                    throw new Error("Request canceled after silent-recovery publication")
-                  }
-                  if (!recoveryMappingStored) {
-                    // Recovery tool calls are withheld until their exact fork is
-                    // durably addressable. A fingerprint CAS loser must not emit
-                    // calls from the fork that cleanup is about to retire.
-                    silentTurnRecovered = false
-                    recoveryToolCallAssistantUuid = undefined
-                    capturedToolUses.splice(capturedBeforeRecovery)
-                    if (profileSessionId) {
-                      throw new Error("Shared session mapping changed before silent recovery publication")
-                    }
-                    claudeLog("session.fingerprint_publication_lost", { mode: "silent_recovery" })
-                    void sweepSessionGc()
+                    recoveryReplayReady = true
                   } else {
-                    currentSessionId = recoverySessionId
-                    nextPassthroughToolCallAssistantUuid = recoveryToolCallAssistantUuid
-                    nextPassthroughToolCallIds = recoveryToolCallAssistantUuid
-                      ? [...recoveryEarlyStop.expected]
-                      : undefined
-                    sdkUuidMap.length = 0
-                    sdkUuidMap.push(...recoverySdkUuidMap)
-                    mappingExpectedGeneration = recoveryMappingStored
-                    recoveryForkPublished = true
-                    void sweepSessionGc()
-                    commitSessionTurn(recoverySessionId)
+                    const recoverySdkUuidMap = allMessages.map(() => null)
+                    if (!bookkeepingHandle) await commitFork(recoveryForkTarget, admissionLifecycleOptions)
+                    assertDurableWritesAllowed()
+                    const recoveryMappingStored = await publishPinnedTranscript(
+                      recoveryForkTarget,
+                      () => {
+                        assertDurableWritesAllowed()
+                        return mapStoreMutation(storeSession(
+                          profileSessionId,
+                          lineageMessages,
+                          recoverySessionId!,
+                          profileScopedCwd,
+                          recoverySdkUuidMap,
+                          lastUsage,
+                          recoveryToolCallAssistantUuid ?? null,
+                          recoveryToolCallAssistantUuid ? [...recoveryEarlyStop.expected] : null,
+                          recoveryForkTarget,
+                          recoveryForkSource,
+                          mappingExpectedGeneration,
+                          options.priorityPublication,
+                          !executionHistory.changed,
+                          resumeContextHash,
+                          assertDurableWritesAllowed,
+                        ), stored => {
+                          // JSON cancellation shares this request queue; SQL flags wait for COMMIT below.
+                          if (stored && !bookkeepingHandle) {
+                            mappingExpectedGeneration = stored
+                            recoveryForkPublished = true
+                            recoveryPublishedTarget = recoveryForkTarget
+                          }
+                          return stored
+                        })
+                      },
+                      admissionLifecycleOptions,
+                    )
+                    if (recoveryMappingStored) {
+                      mappingExpectedGeneration = recoveryMappingStored
+                      recoveryForkPublished = true
+                      recoveryPublishedTarget = recoveryForkTarget
+                    }
+                    if (requestAbort.controller.signal.aborted || durableWritesRevoked) {
+                      if (
+                        recoveryMappingStored && !isIndependentSession &&
+                        !(await evictSession(profileSessionId, profileScopedCwd, lineageMessages, mappingExpectedGeneration))
+                      ) {
+                        throw new Error("Shared session mapping changed after canceled silent-recovery publication")
+                      }
+                      throw new Error("Request canceled after silent-recovery publication")
+                    }
+                    if (!recoveryMappingStored) {
+                      // Recovery tool calls are withheld until their exact fork is
+                      // durably addressable. A fingerprint CAS loser must not emit
+                      // calls from the fork that cleanup is about to retire.
+                      silentTurnRecovered = false
+                      recoveryToolCallAssistantUuid = undefined
+                      capturedToolUses.splice(capturedBeforeRecovery)
+                      if (profileSessionId) {
+                        throw new Error("Shared session mapping changed before silent recovery publication")
+                      }
+                      claudeLog("session.fingerprint_publication_lost", { mode: "silent_recovery" })
+                      void sweepSessionGc()
+                    } else {
+                      currentSessionId = recoverySessionId
+                      nextPassthroughToolCallAssistantUuid = recoveryToolCallAssistantUuid
+                      nextPassthroughToolCallIds = recoveryToolCallAssistantUuid
+                        ? [...recoveryEarlyStop.expected]
+                        : undefined
+                      sdkUuidMap.length = 0
+                      sdkUuidMap.push(...recoverySdkUuidMap)
+                      mappingExpectedGeneration = recoveryMappingStored
+                      recoveryForkPublished = true
+                      void sweepSessionGc()
+                      commitSessionTurn(recoverySessionId)
+                    }
                   }
                 }
-                if (!recoveryForkPublished) {
+                if (!recoveryForkPublished && !recoveryReplayReady) {
                   silentTurnRecovered = false
                   recoveryToolCallAssistantUuid = undefined
                   capturedToolUses.splice(capturedBeforeRecovery)
@@ -7797,6 +7864,10 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                   )
                 }
                 } catch (recoveryError) {
+                  if (!recoveryForkPublished && !recoveryReplayReady) {
+                    silentTurnRecovered = false
+                    capturedToolUses.splice(capturedBeforeRecovery)
+                  }
                   claudeLog("response.silent_turn_recovery_failed", {
                     mode: "stream_lifecycle",
                     error: recoveryError instanceof Error ? recoveryError.message : String(recoveryError),
@@ -8294,14 +8365,14 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               // declared calls, and no dropped calls before retaining its
               // settled assistant checkpoint (see proxy-core SPEC).
               //
-              // Keeping the captured checkpoint lets the next request rewind
+              // Keeping a captured single-call checkpoint lets the next request rewind
               // to the tool-use boundary and append the client's real
               // tool_result, instead of replaying the conversation against a
               // cold cache. Other drain failures remain unsafe and are
               // evicted.
               //
-              // Exactly one streamed call. Resuming two or more rejected calls
-              // drops the client's real tool results; those turns are evicted
+              // Exactly one streamed call. Multi-call checkpoints, captured or
+              // rejected, cannot prove delivery of all real results and are evicted
               // and the next request is a full replay.
               const canonicalRejectedCheckpoint =
                 uncapturedRecoveryActive &&
@@ -8316,6 +8387,15 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                   requestTools.some((tool: { name: string }) => tool.name === record.name))
               const recoverableCheckpoint =
                 (canRecoverAsToolUse || canonicalRejectedCheckpoint) &&
+                !checkpointPublicationRequiresReplay({
+                  clientToolCallIds: [...streamedToolUseIds, ...capturedToolUses.map(tool => tool.id)],
+                  checkpointToolCallIds: nextPassthroughToolCallIds,
+                  observedToolCallIds: [...observedToolUseIds, ...streamedToolUseIds],
+                  forwardedToolUseIds: canonicalRejectedCheckpoint
+                    ? new Set([...forwardedToolUseIds, ...streamedToolUseIds])
+                    : forwardedToolUseIds,
+                  checkpointReady: true,
+                }) &&
                 sdkTerm.reason === "max_turns" &&
                 Boolean(currentSessionId) &&
                 Boolean(nextPassthroughToolCallAssistantUuid) &&

@@ -1,5 +1,213 @@
 # Mixed and multi-turn rejected checkpoint evidence
 
+## Approved all-captured fallback (2026-11-14)
+
+**Status: implemented and locally verified; not reviewed, integrated or activated.**
+This section supersedes the historical all-captured retention restrictions and
+stop conditions below. The operator explicitly approved diagnosis first, then
+multi-call fresh replay if a Meridian-side resume repair could not be proven.
+Worktree: `/srv/dev/ai/meridian-wt-mixed-rejection`; branch:
+`fix/mixed-rejection-resume`; implementation starts from `c810a48b`.
+No SDK/CLI package changes, live model calls, live cache writes, production
+service operations, publication or integration were performed.
+
+### Diagnosis before fallback
+
+Linux x64, Bun 1.3.14, Agent SDK 0.2.141, actual Claude Code 2.1.322 at
+`/home/ras/.local/share/claude/versions/2.1.322`. Every CLI probe uses the
+committed offline HTTP harness, scripted loopback upstream and disposable state.
+First reproduced both exact operator commands on unchanged c810a48b:
+
+```sh
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322 --captured --calls=2
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322 --captured --calls=3
+# Each exit 1: resumed upstream lacks real client result for toolu_offline_1
+# CLIENT_CALLS expected=received=2 / 3; retained checkpoint; real=[toolu_offline].
+# CLI placeholders replace call 2 / calls 2 and 3 respectively.
+```
+
+Searched the existing structured-input/coalescing, checkpoint tracking and
+freeze paths, SDK resumeSessionAt declaration, and the existing offline/paced
+fixture rather than building a second transport. SDK documentation requires an
+assistant-message UUID. Existing notes already prove a single grouped SDK
+input carries all three real results. Ranked hypotheses: input order/grouping,
+rewind fragment selection, then hook settlement timing. Tested each independently
+using the three-captured command above (same result/assistant assertions):
+
+| Temporary Meridian-only probe | Exit | Observed upstream outcome |
+|---|---:|---|
+| Reverse structured content blocks at makePrompt | 1 | No exact real result; calls 2/3 still have placeholders |
+| Split native results into one SDK user input per block | 1 | Only call 1 real; calls 2/3 still placeholders |
+| Delay each forwarding denial an additional 100 ms after the existing hold | 1 | Only call 1 real; calls 2/3 still placeholders |
+| Keep the first, rather than last, assistant fragment UUID | 1 | Call 1 real, but later assistant calls absent; fails assistant completeness |
+
+All source probes restored saved bytes in Python `finally`, with
+`IMPLEMENTATION_RESTORED True`. No package or transcript mutation was used.
+These experiments did **not** prove the CLI-internal cause or a safe input
+contract; a failed delay probe does not exclude every possible timing defect.
+Therefore the approved fallback, not a speculative CLI workaround, is used.
+
+### Implementation and coverage
+
+`checkpointRequiresReplay` retains the existing capture-proof check and rejects
+any checkpoint with more than one distinct call ID. JSON completion, SSE
+completion and captured-error recovery use it before publishing mappings. A
+read-side guard also replays previously retained multi-call checkpoints, so
+upgrading does not leave old unsafe mappings resumable. Ordinary non-tool
+resumes, single-call captured checkpoints and the canonical single-call
+name-dispatch rejection exception are unchanged. JSON's independent capture
+checks still cover all emitted/streamed IDs; hidden captured digest metadata
+pruned from the client-visible batch does not alone force multi-call eviction.
+No wire API, schema, dependency, routing or CLI behavior was changed.
+
+New HTTP regressions cover 1/2/3 captured calls × SSE/JSON × capped-error/normal
+completion (12 cases), plus two previously retained 2/3-call mapping cases.
+They assert retention/eviction, resume options and exactly one occurrence of
+each real result in the SDK prompt. Existing three-turn thinking, late fragment,
+unstreamed recovery, OpenAI parallel, deny-hold and duplicate tests now require
+safe replay where appropriate while preserving complete tool delivery checks.
+The rollback-UUID test uses text plus a single tool fragment to keep exercising
+the still-supported checkpoint-fork behavior. The hidden-digest/single-call
+retention regression remains unchanged and passes.
+
+Red command, with **only** server.ts and passthroughEarlyStop.ts temporarily
+restored from c810a48b (finally restored byte-for-byte):
+
+```sh
+bun test src/__tests__/passthrough-early-stop-integration.test.ts --timeout 30000 --test-name-pattern 'all-captured checkpoint|legacy retained'
+# exit 1: 4 pass, 10 fail, 124 assertions (all four single-call controls pass).
+```
+
+Final focused command:
+
+```sh
+bun test src/__tests__/proxy-passthrough-deny-abort.test.ts src/__tests__/proxy-stream-deny-hold.test.ts src/__tests__/passthrough-early-stop-integration.test.ts src/__tests__/passthrough-early-stop.test.ts --timeout 30000
+# exit 0: 313 pass, 0 fail, 2504 assertions, 4 files.
+```
+
+The earlier two-file focused command (the last two paths above) passed 293/0,
+2399 assertions after adding legacy-map regressions. During development it
+reported 283/8, then 291/0 before those two extra regressions; the eight failures
+were obsolete parallel-retention expectations, corrected to require replay.
+The first generated regression fixture had shell-expanded template literals;
+it was corrected and read back before collecting the distinct-ID red evidence
+(4/8, 116 assertions), then rechecked against c810a48b as recorded above.
+The first expanded four-file run reported 312/1, 2498 assertions: the dropped
+JSON duplicate case already evicts on c810a48b (baseline targeted command:
+`bun test src/__tests__/proxy-passthrough-deny-abort.test.ts --test-name-pattern 'checkpoint retains only' --timeout 30000`, exit 1, 1 pass/1 fail, 12 assertions).
+Its assertion now preserves that capture-proof behavior rather than expanding
+single-call retention to an uncaptured dropped ID.
+
+### Final offline real-CLI matrix
+
+Command prefix for every row (each exit 0, independently checked):
+
+```sh
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322
+```
+
+| Arguments | Pass/fail | Upstream requests | Checkpoint |
+|---|---|---:|---|
+| default | 1/0 | 2 | retained |
+| `--thinking --calls=1` | 1/0 | 2 | retained |
+| `--thinking --calls=3` | 1/0 | 2 | evicted |
+| `--mixed --calls=2` | 1/0 | 2 | evicted |
+| `--mixed --calls=2 --input-validation` | 1/0 | 2 | evicted |
+| `--deferred --calls=2` | 1/0 | 3 | evicted |
+| `--deferred --calls=2 --mixed --captured-last --non-stream` | 1/0 | 2 | evicted |
+| `--deferred --calls=1` | 1/0 | 3 | evicted |
+| `--deferred --calls=1 --non-stream` | 1/0 | 3 | evicted |
+| `--deferred --calls=1 --input-validation` | 1/0 | 3 | evicted |
+| `--captured --calls=1` | 1/0 | 2 | retained |
+| `--captured --calls=2` | 1/0 | 2 | evicted |
+| `--captured --calls=3` | 1/0 | 2 | evicted |
+| `--captured --calls=3 --sse-delay-ms=25 --distinct-tools` | 1/0 | 2 | evicted |
+
+**14 pass / 0 fail**, including the original 11-case matrix. All rows report
+`liveModelCalls:0` and exact CLIENT_CALLS expected/received equality. Every
+follow-up contains every real result; single-call retained cases still use
+native assistant/results without denials. The new cases print:
+
+```text
+checkpointRetained:false
+PASS follow-up: fresh replay, not a resumed continuation; real client result for every call; no CLI rejection
+```
+
+The harness changes only the expected retention policy and adds an explicit
+no-internal-error-placeholder assertion. Exact client-call-set, per-result
+content, native-assistant-versus-replay and no-retry assertions remain intact.
+The complete matrix passed during development and again after final
+source/test/runner changes, not as unexplained green retries of a red case.
+
+### Full gates and test-runner isolation
+
+| Command | Exit | Concrete result |
+|---|---:|---|
+| `npm test` (final, includes pretest `tsc --noEmit`) | 0 | 9036 pass, 0 fail, 28 skip, 50221 assertions across 32 process-isolated runs |
+| `npm run typecheck` | 0 | `tsc --noEmit`, no diagnostics |
+| `npm run build` | 0 | Node entrypoints bundled; `Certified local build 2 (216c157b-1e3b-406d-9d3c-b2879cabd5ff)` |
+| `git diff --check` | 0 | no whitespace errors |
+
+The 28 existing skips are 27 compatibility cases requiring the unsupplied
+BOOKKEEPING_COMPAT_TARBALL and one Windows-only PID-reuse recovery case on Linux;
+no coverage is claimed for those skipped cases. Earlier typecheck/build invocations
+also exited 0 (build 1 was an intermediate local bundle, not installed).
+
+The first `npm test` exited 1: 8235 pass, 6 fail, 28 skip, 44877 assertions.
+Five failures asserted obsolete/baseline parallel or dropped-duplicate retention;
+the sixth was a process-global filesystem-spy collision in store-mutation-baseline.
+That collision reproduces with unchanged c810a48b implementation using
+`bun test src/__tests__/sticky-routing-integration.test.ts src/__tests__/store-mutation-baseline.test.ts --timeout 30000`
+(exit 1, 7 pass/1 fail, 31 assertions). The store file alone passes
+`bun test src/__tests__/store-mutation-baseline.test.ts --timeout 30000`
+(exit 0, 3 pass/0 fail, 17 assertions). Its warm mutation trace sees unrelated
+session lifecycle `sync:data`, `link:data->data`, `unlink:data` operations after
+proxy initialization. It now runs separately using the existing package.json
+process-isolation recipe; no assertions were removed or skipped.
+
+The second `npm test` exited 1: 8237 pass, 1 fail, 28 skip, 44888 assertions.
+The bookkeeping-runtime offline migration case found a live **same-process**
+`session-gc.json.lock.candidate` while mixed with proxy tests. Its isolated run
+`bun test src/__tests__/bookkeeping-runtime.test.ts --timeout 30000` passed
+10/0, 45 assertions; a baseline sticky-routing pair passed 15/0, 60 assertions
+(`bun test src/__tests__/sticky-routing-integration.test.ts src/__tests__/bookkeeping-runtime.test.ts --timeout 30000`, exit 0).
+The narrower current-source command
+`bun test src/__tests__/proxy-error-handling.test.ts src/__tests__/settings-unit.test.ts src/__tests__/passthrough-input-coercion.test.ts src/__tests__/bookkeeping-runtime.test.ts --timeout 30000`
+passed 54/0, 191 assertions, exit 0. Thus the full-suite collision is not
+reliably reproduced by those narrower combinations. The runtime file now also
+runs in its own process, preventing earlier proxy jobs from entering its
+explicit offline migration fixture. This is test isolation, **not** a fix for
+any production session-GC lock defect; that separate worker's implementation
+and worktree were not touched. With both files isolated, the entire declared
+npm test chain, including all downstream groups previously short-circuited by
+failures, passes. Root production-lock diagnosis remains with the parent/worker.
+
+### Cache cost and remaining limits
+
+Using only the operator's supplied production rates, not a fresh journal query:
+64–66 two-call plus 7–9 three-call captured checkpoints/day yields **71–75
+newly replay-eligible follow-ups/day**, if every checkpoint receives a follow-up
+(2130–2250 over 30 days at that rate). Each loses one opportunity to resume its
+old SDK prefix; it does not add an extra model request in the offline cases.
+If the replayed prefix averages P2/P3 tokens for two-/three-call turns, the
+prefix rebuilt per day is approximately `(64–66)*P2 + (7–9)*P3` tokens, or
+`(71–75)*P` for a common average P. These are candidate prefix-rebuild tokens,
+not measured cache misses: actual caching may reuse some replay prefixes.
+There are no production prefix-token sizes, cache-read/write usage or measured
+billing deltas in this brief, so a dollar estimate or percentage cache drop
+would be invented. Single-call capture keeps its existing cache benefit.
+
+No new product/architecture choice was made: this applies the explicitly
+approved fallback. Exact CLI-internal cause remains undetermined; native
+multi-call resume is not repaired or qualified. Full replay cannot restore
+SDK-only thinking absent from client history and still follows existing replay
+budgeting. The separate real-CLI JSON parallel forwarding and absent-boundary
+reachability limits described below are not repaired. Cross-vendor review,
+actual live-model/client acceptance, integration and activation remain with the
+parent; live calls and production changes were explicitly prohibited here.
+Temporary local logs are summarized here and removed at handoff; no test units
+or other long-lived processes were started.
+
 ## Verification and three-captured diagnosis (2026-11-14)
 
 **Status: guard verification passed; separate pre-existing all-captured resume

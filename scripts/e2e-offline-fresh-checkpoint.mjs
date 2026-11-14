@@ -3,6 +3,8 @@
 // No provider credentials, live model calls, or existing Meridian state are used.
 // bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/absolute/path/to/claude
 // Optional: --thinking --calls=1|2|3 --transient-tail (client-history mutation control).
+// --calls=1 retains the rejection checkpoint and resumes. --calls=2|3 evicts it
+// and the follow-up is a fresh replay carrying every real client result.
 import assert from "node:assert/strict"
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs"
 import { join, resolve } from "node:path"
@@ -112,19 +114,31 @@ try {
   assert.equal(first.status, 200)
   assert(!firstBody.includes("event: error"), firstBody)
   assert(firstBody.includes('"stop_reason":"tool_use"'), firstBody)
+  const retainCheckpoint = callCount === 1
   const mapping = lookupSharedSession("offline:" + session)
-  assert(mapping, "fresh canonical rejection lost its mapping")
-  assert.deepEqual(mapping.messageHashes, computeMessageHashes(firstHistory))
-  assert.deepEqual(mapping.passthroughToolCallIds, calls.map(call => call.id))
-  assert(mapping.passthroughToolCallAssistantUuid)
-  const file = readdirSync(root, { recursive: true }).find(path =>
-    String(path).endsWith(mapping.claudeSessionId + ".jsonl"))
-  assert(file, "mapped CLI transcript must exist before terminal delivery")
-  const rows = readFileSync(join(root, String(file)), "utf8").trim().split("\n").map(line => JSON.parse(line))
-  assert(rows.some(row => row.type === "assistant" && row.uuid === mapping.passthroughToolCallAssistantUuid))
-  assert(rows.some(row => row.message?.content?.some?.(block => block.type === "tool_result" &&
-    block.content === "<tool_use_error>Error: No such tool available: read</tool_use_error>")))
-  console.log("PASS fresh: CLI rejected bare read before PreToolUse; canonical transcript and checkpoint exist")
+  const rejectionText = "<tool_use_error>Error: No such tool available: read</tool_use_error>"
+  if (retainCheckpoint) {
+    assert(mapping, "fresh canonical rejection lost its mapping")
+    assert.deepEqual(mapping.messageHashes, computeMessageHashes(firstHistory))
+    assert.deepEqual(mapping.passthroughToolCallIds, calls.map(call => call.id))
+    assert(mapping.passthroughToolCallAssistantUuid)
+    const file = readdirSync(root, { recursive: true }).find(path =>
+      String(path).endsWith(mapping.claudeSessionId + ".jsonl"))
+    assert(file, "mapped CLI transcript must exist before terminal delivery")
+    const rows = readFileSync(join(root, String(file)), "utf8").trim().split("\n").map(line => JSON.parse(line))
+    assert(rows.some(row => row.type === "assistant" && row.uuid === mapping.passthroughToolCallAssistantUuid))
+    assert(rows.some(row => row.message?.content?.some?.(block => block.type === "tool_result" &&
+      block.content === rejectionText)))
+    console.log("PASS fresh: CLI rejected bare read before PreToolUse; canonical transcript and checkpoint exist")
+  } else {
+    assert.equal(mapping, undefined, "multi-call canonical rejection must evict its mapping")
+    const transcripts = readdirSync(root, { recursive: true }).filter(path => String(path).endsWith(".jsonl"))
+    assert(transcripts.length > 0, "CLI transcript must exist even when the mapping is evicted")
+    const rows = transcripts.flatMap(file => readFileSync(join(root, String(file)), "utf8").trim().split("\n").map(line => JSON.parse(line)))
+    assert(rows.some(row => row.message?.content?.some?.(block => block.type === "tool_result" &&
+      block.content === rejectionText)), "CLI must still have rejected the calls before PreToolUse")
+    console.log("PASS fresh: CLI rejected " + callCount + " bare reads before PreToolUse; mapping evicted")
+  }
   // Assemble the exact client-visible assistant from the emitted stream, not
   // from the canned upstream or the CLI's assistant metadata.
   const content = []
@@ -146,15 +160,17 @@ try {
     { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id, content: "REAL_CLIENT_RESULT" })) },
     ...suffix,
   ]
-  const lineage = verifyLineage({ ...mapping, lastAccess: 0 }, nextHistory)
-  assert.equal(lineage.type, transientTail ? "diverged" : "continuation")
-  if (!transientTail) console.log("PASS lineage: exact streamed assistant plus client results is continuation")
-  if (transientTail) {
-    assert.equal(lineage.reason, "modified-history")
-    assert.equal(lineage.mismatch.index, firstHistory.length - 2)
-    assert.equal(firstHistory[lineage.mismatch.index].role, "user")
-    assert.equal(lineage.mismatch.incomingShape.role, "assistant")
-    console.log("PASS diagnostic: incoming assistant replaces a stored transient USER slot at count - 2")
+  if (retainCheckpoint) {
+    const lineage = verifyLineage({ ...mapping, lastAccess: 0 }, nextHistory)
+    assert.equal(lineage.type, transientTail ? "diverged" : "continuation")
+    if (!transientTail) console.log("PASS lineage: exact streamed assistant plus client results is continuation")
+    if (transientTail) {
+      assert.equal(lineage.reason, "modified-history")
+      assert.equal(lineage.mismatch.index, firstHistory.length - 2)
+      assert.equal(firstHistory[lineage.mismatch.index].role, "user")
+      assert.equal(lineage.mismatch.incomingShape.role, "assistant")
+      console.log("PASS diagnostic: incoming assistant replaces a stored transient USER slot at count - 2")
+    }
   }
   const next = await post(nextHistory)
   const nextBody = await next.text()
@@ -162,18 +178,44 @@ try {
   assert(!nextBody.includes("event: error"), nextBody)
   assert(nextBody.includes("read complete"), nextBody)
   assert.equal(wire.length, 2)
-  if (!transientTail) for (const call of calls) {
+  const expectResume = retainCheckpoint && !transientTail
+  const replayParts = []
+  const collectReplayText = (value) => {
+    if (typeof value === "string") replayParts.push(value)
+    else if (Array.isArray(value)) for (const item of value) collectReplayText(item)
+    else if (value && typeof value === "object") for (const item of Object.values(value)) collectReplayText(item)
+  }
+  collectReplayText(wire[1].messages)
+  const replayText = replayParts.join("\n")
+  if (expectResume) for (const call of calls) {
     assert(wire[1].messages.some(message => message.role === "assistant" &&
       message.content?.some?.(block => block.type === "tool_use" && block.id === call.id)))
     assert(wire[1].messages.some(message => message.content?.some?.(block =>
       block.type === "tool_result" && block.tool_use_id === call.id && block.content === "REAL_CLIENT_RESULT")),
       "resumed upstream lacks real client result for " + call.id)
   }
-  assert(!JSON.stringify(wire[1].messages).includes("No such tool available"), "resume must rewind before the rejection")
+  if (!retainCheckpoint) {
+    // A fresh SDK query cannot carry native assistant tool blocks. The replay
+    // renders each client result as history text attributed to its call id.
+    assert.equal(replayText.split("REAL_CLIENT_RESULT").length - 1, calls.length,
+      "fresh replay must contain one real client result per call")
+    for (const call of calls) {
+      assert(replayText.includes(`"tool_use_id":"${call.id}"`),
+        "fresh replay lacks real client result for " + call.id)
+    }
+    assert(replayText.includes("now read new file"), "fresh replay must include the client history")
+    assert(!wire[1].messages.some(message => message.role === "assistant" &&
+      message.content?.some?.(block => block.type === "tool_use")),
+      "fresh replay must not resume a native assistant tool turn")
+  }
+  assert(!replayText.includes("No such tool available"),
+    expectResume ? "resume must rewind before the rejection" : "fresh replay must not carry the CLI rejection")
   const turns = telemetryStore.getRecent({ limit: 10 })
-  assert.equal(turns.some(turn => turn.isResume === true), !transientTail,
-    "only an unchanged request prefix can resume")
-  console.log(transientTail
+  assert.equal(turns.some(turn => turn.isResume === true), expectResume,
+    retainCheckpoint ? "only an unchanged request prefix can resume" : "multi-call follow-up must be a fresh replay, not a resumed continuation")
+  console.log(!retainCheckpoint
+    ? "PASS follow-up: fresh replay, not a resumed continuation; real client result for every call; no CLI rejection"
+    : transientTail
     ? "PASS diagnostic: transient suffix reproduces fresh replay; no assistant rewriting"
     : "PASS continuation: native assistant and real client result; rejection rewound; exactly two upstream calls")
   const sdkVersion = JSON.parse(readFileSync(new URL("../node_modules/@anthropic-ai/claude-agent-sdk/package.json", import.meta.url), "utf8")).version

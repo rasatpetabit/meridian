@@ -61,6 +61,9 @@ checkpoint alongside captured recovery. It additionally requires:
 - an iterator-observed canonical result;
 - complete streamed calls all declared by the client;
 - exact CLI name-dispatch rejections for every call and no dropped calls;
+
+A later restriction (see Open item) retains that checkpoint only when the
+rejected assistant turn has exactly one streamed tool call.
 - the existing settled UUID, complete ID set, non-independent request, and
   generation/publication/CAS guards.
 
@@ -147,3 +150,32 @@ absent by task constraint. Cross-vendor review was unavailable through this
 agent's supplied tools; this is a locally verified change, not deployment or
 merge approval. Parent/operator review remains a landing gate, as does the
 pre-existing full-suite failure. No new architecture/product escalation.
+
+## Open item: multi-call canonical rejection
+
+Retaining the checkpoint is correct for one rejected call and wrong for
+several. With three parallel bare `read` calls, the real CLI rejects every
+name before PreToolUse and writes `error_max_turns`, but resuming that
+checkpoint sends the next turn upstream **without** the real client tool
+results. `4a362bdf` kept the checkpoint whenever every streamed call was
+rejected. The checkpoint is now retained only when
+`streamedToolBlockRecords.size === 1`. Two or more rejected calls are evicted
+again (the pre-`4a362bdf` behaviour): the next turn is a full replay, so the
+upstream request contains the real client result for every call and no
+`No such tool available`.
+
+This is not a multi-call delivery fix. A resume that rewinds the rejection
+and appends every client result is still open.
+
+Reproduction, real CLI, no live model (fails on `0568011e` / `4a362bdf`
+retention; `--calls=1` passes there):
+
+```
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322 --thinking --calls=3
+```
+
+Before the one-call limit the follow-up died with:
+
+```
+AssertionError: resumed upstream lacks real client result for toolu_offline
+```

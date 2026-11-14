@@ -525,6 +525,12 @@ describe("classifyError", () => {
       expect(classifyError("Claude Code process exited with code 143: authentication failed").status).toBe(401)
     })
 
+    it("ignores signal text quoted in appended stderr", () => {
+      const result = classifyError("Claude Code process exited with code 2\nSubprocess stderr: helper process terminated by signal SIGTERM")
+      expect(result.status).toBe(502)
+      expect(result.message).not.toMatch(/service temporarily unavailable/i)
+    })
+
     it("leaves other signals on the generic error path", () => {
       const result = classifyError("Claude Code process terminated by signal SIGABRT")
       expect(result.status).toBe(500)

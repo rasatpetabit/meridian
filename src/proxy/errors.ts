@@ -455,7 +455,9 @@ export function classifyError(errMsg: string, model?: string): ClassifiedError {
   }
 
   // SDK process crash
-  const stoppedSignal = errMsg.match(/process terminated by signal (SIGTERM|SIGKILL)\b/)?.[1]
+  // Only the SDK's own termination line names the signal, never text quoted in
+  // appended subprocess stderr.
+  const stoppedSignal = (errMsg.split(/subprocess stderr:/i)[0] ?? "").match(/process terminated by signal (SIGTERM|SIGKILL)\b/)?.[1]
   if (lower.includes("exited with code") || lower.includes("process exited") || stoppedSignal) {
     const codeMatch = errMsg.match(/exited with code (\d+)/)
     const code = codeMatch ? codeMatch[1] : "unknown"

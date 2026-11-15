@@ -1,5 +1,225 @@
 # Mixed and multi-turn rejected checkpoint evidence
 
+## Resume mixed name-dispatch batches (CLI 2.1.322 / SDK 0.2.141)
+
+**Current refinement; supersedes the mixed-batch replay conclusions below only
+for qualified two-/three-call streamed name-dispatch batches.** Based on
+`aebca07fd02ee0c8e2e93292ce1b92b9a9444f88`, branch
+`fix/mixed-name-dispatch-hybrid`, isolated worktree
+`/srv/dev/ai/meridian-wt-mixed-hybrid`. No public API, session schema, system/tool
+prefix, replay renderer or installed software changed. No push, merge, PR,
+installation, service action, production-store access or live model call.
+Other worktrees and the main checkout were not modified. This is offline
+transport/persistence proof, not a claim about provider cache billing or live
+model name selection. The operator-supplied production trace/rate estimates
+were not independently read or used as measured results here.
+
+### Mechanism and safety boundary
+
+The unchanged baseline reproduces the reported cause: a bare declared tool name
+is rejected by CLI 2.1.322 before PreToolUse, alongside a registered call that
+was captured. The settled batch loses its mapping and the next HTTP request
+replays the full prefix. No new replay format was needed: reuse the existing
+first-fragment hybrid input and both fresh-replay renderers. The local/upstream
+prior art is the all-captured hybrid and canonical single-call refusal path
+already present in this baseline; no new SDK serializer is introduced.
+
+At checkpoint freeze, require the ordinary complete streamed/tracked call set
+and a first assistant fragment with exactly one tool use. In addition to the
+existing all-captured qualification, admit a batch of 2–3 calls with at least
+one capture, at the one-turn cap, no dropped/deferred/client-ToolSearch calls,
+and naturally closed, **strictly valid JSON object** wire arguments. Every
+uncaptured ID must be in `cliUnavailableToolIds`, have the refusal name match
+its resolved streamed name, and name a declared client tool. Strict JSON is
+additional to `streamedToolBlockVeto`: that existing helper deliberately
+accepts repaired raw control characters for delivery, not hybrid qualification.
+
+Keep these qualified refusal IDs separate from `forwardedToolUseIds` (actual
+hook captures). Only an explicit hybrid marker adds their proof to the normal
+streamed/canonical turn-cap publication guard; JSON and silent recovery get no
+new permission. Existing canonical-result, exact-set, duplicate, cancellation,
+durability and generation/CAS publication guards remain in place. The separate
+canonical **single-call** refusal path is unchanged.
+
+Resume at the first fragment, give call 1 its real native client result even
+when its name was bare, and render later calls/results as completed-call
+records. There are no later native tool_result orphans, no rejection text in
+any resumed upstream request, and no re-execution request. The consolidated
+assistant retains a **null undo UUID**; editing any result takes fresh replay.
+The HTTP positives verify both that null slot and the edited-result replay.
+Grouped first fragments, malformed/InputValidationError, undeclared or
+mismatched refusals, deferred/ToolSearch, JSON, unstreamed and non-native images
+remain unqualified. No new product/architecture decision was taken.
+
+### Reproduction commands and RED (runtime unchanged)
+
+All rows use Bun 1.3.14, Linux x64, real SDK 0.2.141 and real CLI 2.1.322:
+
+```sh
+CLI=/home/ras/.local/share/claude/versions/2.1.322
+E=/mnt/ai-scratch/meridian-mixed-hybrid
+export MERIDIAN_E2E_SCRATCH="$E"
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude="$CLI" <arguments> --wire="$E/<row>-wire.json"
+```
+
+The harness uses only loopback scripted upstream responses and disposable
+HOME/config/session/workdir/TMPDIR; it removes those temporary trees in finally.
+The committed harness is the reproducible escrow. Wire/log files remain under
+`$E`, not `/tmp`; no private production transcript was copied into this record.
+`<row>.log` accompanies every wire capture.
+
+| RED row | Exact arguments | Exit | Decisive evidence |
+|---|---|---:|---|
+| red-later2 | `--mixed --calls=2` | 0 | `checkpointRetained:false`; fresh-replay PASS below |
+| red-first2 | `--mixed --calls=2 --captured-last` | 0 | Same |
+| red-later3 | `--mixed --calls=3` | 0 | Same (two bare later calls) |
+| red-sole-2-2 | `--mixed --calls=2 --bare-call=2` | 1 | `checkpointRetained:false`; `AssertionError: R1: upstream message prefix changed` |
+| red-sole-2-1 | `--mixed --calls=2 --bare-call=1` | 1 | Same |
+| red-sole-3-2 | `--mixed --calls=3 --bare-call=2` | 1 | Same (one bare middle call) |
+
+The first three run the unchanged harness's old expected behavior:
+
+```text
+PASS follow-up: fresh replay, not a resumed continuation; every supplied real client result; no CLI rejection
+```
+
+Then `--bare-call` and the new hybrid expectation were added to the harness,
+without modifying runtime code. R1 and its `stripCache` canonicalization were
+**not** changed. Those three strict REDs are prefix failures, not missing
+captures asserted in isolation. The new HTTP tests ran before the runtime fix:
+
+```sh
+TMPDIR="$(mktemp -d /tmp/meridian-mixed-red.XXXXXX)" \
+  bun test src/__tests__/passthrough-early-stop-integration.test.ts \
+  --test-name-pattern 'stream: hybrid .*bare='
+```
+
+`red-http.log`: exit 1, **2 pass / 4 fail**, 69 assertions. Both existing
+all-captured rows pass; bare-first/bare-last at 2 and 3 calls fail at the null
+undo-slot expectation (`Received: undefined`), because the mapping was evicted.
+An earlier authoring run had a syntax error before tests loaded; it was
+corrected before this actual RED and is not counted as regression evidence.
+Every temporary `/tmp/meridian-mixed-*` test directory was removed.
+
+### GREEN: strict R1, fidelity, follow-on and rejection hygiene
+
+| GREEN row | Exact arguments | Exit |
+|---|---|---:|
+| green-2-1 | `--mixed --calls=2 --bare-call=1 --follow-on` | 0 |
+| green-2-2 | `--mixed --calls=2 --bare-call=2 --follow-on` | 0 |
+| green-3-1 | `--mixed --calls=3 --bare-call=1 --follow-on` | 0 |
+| green-3-2 | `--mixed --calls=3 --bare-call=2 --follow-on --thinking` | 0 |
+| green-3-3 | `--mixed --calls=3 --bare-call=3 --follow-on` | 0 |
+| green-three-two-bare-later | `--mixed --calls=3 --follow-on` | 0 |
+| green-three-two-bare-first | `--mixed --calls=3 --captured-last --follow-on` | 0 |
+
+All seven retain mapping/native-first-call IDs, pass continuation lineage and
+`isResume` telemetry checks, and emit these unweakened receipts:
+
+```text
+PASS R1: system, tools and messages retain the complete upstream prefix
+PASS result fidelity: native call-1 structurally equals client result; later records equal replay renderer (text)
+PASS hybrid continuation: first native result plus completed-call records; every real result exactly once
+PASS follow-on R1/R2: settled 2 calls; existing prefix unchanged; every real result exactly once
+PASS follow-on R1/R2: settled 1 calls; existing prefix unchanged; every real result exactly once
+PASS wire hygiene: no CLI rejection text in any upstream request
+```
+
+Three-call rows say `settled 3 calls`, not 2, for the first follow-on. Each
+runs four upstream requests, `liveModelCalls:0`. Results from **all preceding
+turns** are checked exactly once. `green-results.json` records full commands,
+exits, PASS lines and live-call counts. Every GREEN above was repeated after
+the strict-JSON qualification and final source naming correction.
+
+### Controls, discoveries and complete 46-row matrix
+
+| Control row | Exact arguments | Exit | Outcome |
+|---|---|---:|---|
+| control-input | `--mixed --calls=2 --input-validation` | 0 | Fresh replay; real results, no rejection |
+| control-deferred | `--mixed --calls=2 --deferred` | 0 | Same |
+| control-json-first | `--mixed --calls=2 --captured-last --non-stream` | 0 | Same |
+| control-json-deferred | `--mixed --calls=2 --captured-last --non-stream --deferred` | 0 | Same |
+| control-image2 | `--captured --calls=2 --result-kind=image-later` | 0 | Non-native image replay, exact media/attribution |
+| control-image3 | `--captured --calls=3 --result-kind=image-later --follow-on --thinking` | 0 | Same; follow-on replay then final native single-call resume |
+
+These six all report `liveModelCalls:0`; `controls-results.json` records their
+commands and receipts. Additional HTTP negative controls use split metadata,
+not just grouped fragments: grouped first fragment, raw-tab bare JSON,
+incomplete JSON, undeclared bare name, wrong refusal name, wrong refusal ID,
+deferred tools and JSON mode all evict and replay real results once with no
+CLI error text. Existing abort, ToolSearch and image tests remain active.
+
+**Residual discovery, not fixed:** exploratory `control-json`,
+`--mixed --calls=2 --non-stream` (bare later), exits 1: client-visible call
+count is 1 rather than 2. Mapping eviction itself is correct. The unchanged
+JSON implementation loses the later bare call; this patch changes only SSE
+checkpoint qualification/publication, not JSON forwarding. The operator's
+parallel JSON-forwarding session owns that area; it was not touched. The
+baseline JSON implementation is source-identical here, not a separately run
+baseline confirmation. The failure and wire remain in `control-json.log` and
+`control-json-wire.json`; `controls-first-results.json` preserves the attempt.
+The explicit bare-first JSON controls and inherited matrix JSON rows pass.
+
+The entire `/mnt/ai-scratch/meridian-multicall-cache/shapes-results.json`
+**46-row argv** was replayed unchanged except replacing each `--wire` path
+with `$E`. All rows from the existing 46-row table below pass: **46 pass,
+0 fail, all `liveModelCalls:0`**. `$E/shapes-results.json` contains full commands,
+exits and PASS lines; per-row `<label>.log` / `<label>-wire.json` use the same
+`shapes-*` labels. Error/image/native-image/reversed/incomplete/unstreamed/
+deferred/non-stream/single-call tests all keep their original receipts.
+Only **one inherited row intentionally moved**:
+
+- `shapes-original-04`, `--mixed --calls=2`, old exit 0:
+  `PASS follow-up: fresh replay, not a resumed continuation; every supplied real client result; no CLI rejection`
+- Same row, new exit 0:
+  `PASS lineage: exact streamed assistant plus client results is continuation`
+  `PASS R1: system, tools and messages retain the complete upstream prefix`
+  `PASS result fidelity: native call-1 structurally equals client result; later records equal replay renderer (text)`
+  `PASS hybrid continuation: first native result plus completed-call records; every real result exactly once`
+  `PASS wire hygiene: no CLI rejection text in any upstream request`
+
+Initial matrix: 42 pass / 4 fail, due solely to an overbroad **new** hygiene
+assertion: deferred rejected-only controls intentionally send CLI rejections
+to their pre-follow-up hidden digest. Its scope was corrected to exclude only
+`digestExpected`, without weakening any original assertion, R1, or mixed-hybrid
+hygiene. Failed original-06/08/09/10 logs are retained as
+`shapes-original-<nn>-hygiene-overreach.log`; `shapes-first-results.json`
+preserves the first matrix. All four reran exit 0 / `liveModelCalls:0`.
+
+### Final checks, review and bounds
+
+Foreground checks with `TMPDIR` set to a fresh `/tmp/meridian-mixed-checks.*`
+directory on tmpfs (not scratch virtiofs), removed by EXIT trap, final size 0:
+
+| Command | Exit | Result |
+|---|---:|---|
+| `bun test src/__tests__/passthrough-early-stop-integration.test.ts` | 0 | 251 pass, 0 fail, 2715 assertions |
+| `bun test src/__tests__/hybrid-tool-result-continuation.test.ts` | 0 | 6 pass, 0 fail, 26 assertions |
+| `npm run typecheck` | 0 | `tsc --noEmit` |
+| `npm run build` | 0 | Certified local build 1 (`1100709f-cfa5-4dec-93c4-231ea7c0b183`), not installed |
+| `npm test` (foreground, 1800 s timeout) | 0 | 9109 pass, 28 skip, 0 fail; 50827 assertions across 32 isolated commands |
+| `node --check scripts/e2e-offline-fresh-checkpoint.mjs` | 0 | Harness syntax valid |
+| `git diff --check` | 0 | No whitespace errors |
+
+Bulk phase: 8266 pass / 28 skip / 0 fail, 489 files, 546.98 s. Skips are the
+existing unavailable `BOOKKEEPING_COMPAT_TARBALL` cases. Logs are
+`check-<suite>.log`, `check-typecheck.log`, `check-build.log`,
+`check-npm-test.log`; `checks-exits.txt` records exits. No filesystem override
+or hook bypass was used. Docs-only edits follow these runtime checks.
+
+Adversarial self-review checked native first-call identity (including bare
+first), absence of later native/orphan results and rejection text, strict
+JSON vs repaired JSON, id/name/declaration proof, canonical-result publication,
+observed late-call vetoes, complete-result/media fallback and null undo UUIDs.
+No new architecture choice or product escalation is needed for this approved
+implementation. Independent cross-vendor review is **not claimed**: this
+bounded tool surface has no governed subagent/advisor tool. Commit-only,
+non-installed scope plus real-wire exact-once/prefix checks and full negative
+controls are the evidence used here; independent review, CI and any future
+activation remain separate gates. `uam_status` was attempted but unavailable
+(`command not found`); inspected process working directories confirmed the
+parallel JSON sessions, not a fleet-wide all-clear.
+
 ## Wire result-shape gate: errors, images, ordering and incomplete results
 
 **Current policy refinement (CLI 2.1.322 / SDK 0.2.141); supersedes the broad

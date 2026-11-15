@@ -141,21 +141,31 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   client, an id/name-matched CLI name-dispatch refusal for that call, no
   dropped calls, and the ordinary settled assistant UUID/full-call-set and
   publication guards. Resume rewinds before the rejection and appends the
-  real client result. All other checkpoint retention requires positive
-  PreToolUse capture proof for every call ID, on JSON completion, SSE
-  completion and captured-error recovery. An uncaptured call evicts the
-  checkpoint regardless of the CLI refusal wording or call count, including
-  InputValidationError and single-call deferred completion. The canonical
-  single-call name-dispatch exception above is unchanged. JSON also checks
+  real client result. Apart from this exception and the qualified mixed hybrid
+  below, checkpoint retention requires positive PreToolUse capture proof for
+  every call ID, on JSON completion, SSE completion and captured-error recovery.
+  Other uncaptured calls evict the checkpoint, including InputValidationError
+  and single-call deferred completion. JSON also checks
   all emitted assistant and streamed call IDs independently of its frozen
   candidate: without boundary events, a later fragment must not hide an
   uncaptured call behind an earlier captured call.
-  **All-captured streamed multi-call batches use first-fragment hybrid
+  **Qualified streamed multi-call batches use first-fragment hybrid
   continuation** (operator-approved Design A, 2026-11-14). Retain only a
   canonical settled checkpoint covering every streamed/client-visible call,
   with positive PreToolUse capture for every observed call and a first
-  assistant fragment containing exactly one tool use. Store that first UUID,
-  all pending client IDs and `passthroughNativeToolCallId` identifying the
+  assistant fragment containing exactly one tool use.
+  **Mixed name-dispatch batches of two or three calls also qualify** at the
+  one-turn cap, with at least one captured call: every uncaptured call must
+  have an id/name-matched CLI name-dispatch refusal (`cliUnavailableToolIds`),
+  name a declared client tool, and have a naturally closed, strictly valid
+  JSON object input on the client wire. Raw-control-character repair is not
+  qualification. Require the exact complete streamed/tracked call set, no
+  dropped calls, no deferred tools or client ToolSearch, and the same canonical
+  SDK-result/publication/abort guards. Keep this proof separate from actual
+  PreToolUse capture; it applies only with the explicit hybrid marker. Either
+  the first call or later calls may be bare. Rewind before every CLI rejection;
+  none of its text may appear in any resumed upstream request. Store that first
+  UUID, all pending client IDs and `passthroughNativeToolCallId` identifying the
   first call. On the next exact complete-result continuation, send one SDK
   user input: that call's native real result, then completed-call/result
   records for the remaining calls, then any queued user content. Reuse
@@ -183,11 +193,15 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   its rollback UUID slot is null, so editing its results replays instead of
   trying a discarded later-fragment UUID. Ordinary undo remains unchanged.
   Legacy multi-call checkpoints without the explicit hybrid marker replay.
-  Mixed/uncaptured batches, JSON completion, assistant-only/unstreamed SSE,
-  silent-turn recovery, missing/ambiguous first-fragment boundaries, and
-  incomplete/mismatched results retain their existing replay policy. Both
-  canonical turn-cap drain-error recovery and normal streamed completion
-  (including deferred PostToolBatch) are covered by the hybrid proof.
+  Unqualified mixed/uncaptured batches, JSON completion, assistant-only/unstreamed
+  SSE, silent-turn recovery, missing/ambiguous or grouped first-fragment boundaries,
+  and incomplete/mismatched results retain their existing replay policy. Both
+  canonical turn-cap drain-error recovery and normal streamed completion use
+  the hybrid publication proof; deferred PostToolBatch still qualifies only
+  all-captured batches. CLI 2.1.322 / SDK 0.2.141 offline mixed-wire tests prove
+  bare-first/bare-later two-/three-call R1, exact-once real result fidelity and
+  follow-on prefix preservation, including thinking. They do not measure live
+  model tool-name selection, provider cache billing or production savings.
   The production motivation was 81/81 captured multi-call evictions in 8.5 h,
   139/143 new-lineage requests writing >=100k tokens (37.3M total), versus
   99.4% cache hits over 2269 continuation requests. These are observed token
@@ -195,12 +209,12 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   Publication uses the shared `checkpointPublicationRequiresReplay` invariant:
   a tool turn requires a canonical settled assistant UUID and an exact match
   between its checkpoint IDs and the client-visible batch, with exactly one
-  captured call or the explicit first-fragment hybrid proof above. SSE computes that batch from both streamed IDs and captured
-  calls queued for the final envelope, not only partial stream events. An
-  assistant-only batch can settle at publication after canonical drain; a
-  captured single call still retains its rewind checkpoint. Any uncaptured
-  assistant or wire call observed during drain invalidates publication even
-  after the candidate latches, including suppressed wire-only fragments without
+  captured call or the explicit first-fragment hybrid proof above. SSE computes
+  that batch from both streamed IDs and captured calls queued for the final
+  envelope, not only partial stream events. An assistant-only batch can settle at publication after canonical drain; a
+  captured single call still retains its rewind checkpoint. Any unqualified
+  uncaptured assistant or wire call observed during drain invalidates publication
+  even after the candidate latches, including suppressed wire-only fragments without
   assistant metadata. Cardinality applies to the client-visible batch, not
   hidden captured digest metadata pruned from that batch. JSON uses the same
   rule with its completed response blocks. Silent recovery must win either

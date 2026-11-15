@@ -10,11 +10,12 @@
 // --result-kind=error-first|error-later|image-first|image-later|reversed|missing-later
 // changes client results only, including subsequent --follow-on turns.
 // --input-validation sends raw-tab JSON to registered names, refused before hooks.
+// --bare-call=1|2|3 selects the sole bare call in a mixed batch.
 // --captured-last puts the captured call last in a mixed batch (JSON backfill).
 // --sse-delay-ms=25 paces individual upstream frames; --distinct-tools with
 // --captured uses a different registered tool for each parallel call.
 // A single name-dispatch rejection at maxTurns=1 retains and resumes. Other
-// uncaptured calls evict and replay; captured streamed batches use hybrid resume.
+// uncaptured calls replay unless a mixed streamed batch qualifies for hybrid resume.
 import assert from "node:assert/strict"
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
@@ -38,7 +39,7 @@ const unstreamed = process.argv.includes("--unstreamed")
 assert(!unstreamed || !nonStream, "--unstreamed requires Meridian SSE")
 const captured = process.argv.includes("--captured")
 const followOn = process.argv.includes("--follow-on")
-assert(!followOn || (captured && !nonStream && !unstreamed), "--follow-on needs captured streamed calls")
+assert(!followOn || ((captured || mixed) && !nonStream && !unstreamed), "--follow-on needs captured or mixed streamed calls")
 const resultKind = process.argv.find(arg => arg.startsWith("--result-kind="))?.slice(14) ?? "text"
 assert(["text", "error-first", "error-later", "image-first", "image-later", "reversed", "missing-later"].includes(resultKind),
   "unknown --result-kind")
@@ -47,6 +48,9 @@ assert(resultKind === "text" || (captured && !nonStream && !unstreamed && callCo
 const missingLater = resultKind === "missing-later"
 assert(!missingLater || callCount === 2, "--result-kind=missing-later requires --calls=2")
 const capturedLast = process.argv.includes("--captured-last")
+const bareCall = Number(process.argv.find(arg => arg.startsWith("--bare-call="))?.slice(12) ?? 0)
+assert(bareCall === 0 || (mixed && Number.isInteger(bareCall) && bareCall >= 1 && bareCall <= callCount), "--bare-call requires --mixed and a valid 1-based call index")
+assert(!bareCall || !capturedLast, "choose --bare-call or --captured-last")
 const inputValidation = process.argv.includes("--input-validation")
 const distinctTools = process.argv.includes("--distinct-tools")
 const sseDelayMs = Number(process.argv.find(arg => arg.startsWith("--sse-delay-ms="))?.slice(15) ?? 0)
@@ -80,10 +84,10 @@ const clientResults = batch => {
   })
   return resultKind === "reversed" ? results.reverse() : results
 }
+const capturedCall = index => captured || (mixed && (bareCall ? index !== bareCall - 1 : index === (capturedLast ? callCount - 1 : 0)))
 const upstreamCalls = calls.map((call, index) => ({ ...call,
-  name: inputValidation || captured || (mixed && index === (capturedLast ? callCount - 1 : 0)) ? "mcp__oc__" + call.name : call.name,
+  name: inputValidation || capturedCall(index) ? "mcp__oc__" + call.name : call.name,
 }))
-const capturedCall = index => captured || (mixed && index === (capturedLast ? callCount - 1 : 0))
 const rawInput = (block, index) => inputValidation && !capturedCall(index)
   ? JSON.stringify(block.input).replaceAll("\\t", "\t") : JSON.stringify(block.input)
 const root = mkdtempSync(join(process.env.MERIDIAN_E2E_SCRATCH ?? process.cwd(), ".fresh-checkpoint-e2e-"))
@@ -221,8 +225,8 @@ try {
   assert(!firstBody.includes("event: error"), firstBody)
   assert(firstBody.includes('"stop_reason":"tool_use"'), firstBody)
   assert.equal(firstRequestCalls, digestExpected ? 2 : 1, "deferred flow must complete its hidden second model turn")
-  const hybrid = captured && callCount > 1 && !nonStream && !unstreamed
-  const retainCheckpoint = (captured && (callCount === 1 || hybrid)) || (!nonStream && !mixed && !deferred && !inputValidation && callCount === 1)
+  const hybrid = (captured || (mixed && !deferred && !inputValidation)) && callCount > 1 && !nonStream && !unstreamed
+  const retainCheckpoint = hybrid || (captured && callCount === 1) || (!nonStream && !mixed && !deferred && !inputValidation && callCount === 1)
   const mapping = lookupSharedSession("offline:" + session)
   const rejectionText = "<tool_use_error>Error: No such tool available: read</tool_use_error>"
   if (extended) {
@@ -247,7 +251,7 @@ try {
       assert(debugEvents.some(event => event.event === "response.unstreamed_turn_forwarded"), "must exercise the unstreamed SSE envelope")
       console.log("UNSTREAMED " + JSON.stringify({ streamEventsSeen: completion.streamEventsSeen, envelopeForwarded: true }))
     }
-    console.log("SHAPE " + JSON.stringify({ mixed, deferred, nonStream, unstreamed, captured, capturedLast, inputValidation, checkpointRetained: Boolean(mapping), firstRequestCalls }))
+    console.log("SHAPE " + JSON.stringify({ mixed, deferred, nonStream, unstreamed, captured, capturedLast, bareCall, inputValidation, checkpointRetained: Boolean(mapping), firstRequestCalls }))
   } else if (retainCheckpoint) {
     assert(mapping, "fresh canonical rejection lost its mapping")
     assert.deepEqual(mapping.messageHashes, computeMessageHashes(firstHistory))
@@ -363,7 +367,7 @@ try {
     assert.deepEqual(stripCache(followUpWire.tools), stripCache(wire[0].tools), "R1: tools prefix changed")
     assert.deepEqual(stripCache(followUpWire.messages.slice(0, wire[0].messages.length)),
       stripCache(wire[0].messages), "R1: upstream message prefix changed")
-    assert(mapping, "R1: all-captured streamed checkpoint must retain the existing SDK session")
+    assert(mapping, "R1: qualified streamed checkpoint must retain the existing SDK session")
     if (hybrid) {
       assert.equal(mapping.passthroughNativeToolCallId, calls[0].id)
       assert.deepEqual(mapping.passthroughToolCallIds, calls.map(call => call.id))
@@ -519,8 +523,13 @@ try {
     }
     assert.equal(wire.length, 4)
   }
+  if (!digestExpected) {
+    assert(!JSON.stringify(wire).includes("No such tool available"), "no upstream request may carry CLI rejection text")
+    assert(!JSON.stringify(wire).includes("<tool_use_error>"), "no upstream request may carry CLI tool error markup")
+    console.log("PASS wire hygiene: no CLI rejection text in any upstream request")
+  }
   const sdkVersion = JSON.parse(readFileSync(join(sourceRoot, "node_modules/@anthropic-ai/claude-agent-sdk/package.json"), "utf8")).version
-  console.log(JSON.stringify({ cli: version, sdk: sdkVersion, callCount, thinking, transientTail, mixed, deferred, nonStream, unstreamed, captured, capturedLast, inputValidation, distinctTools, sseDelayMs, followOn, resultKind, upstreamCalls: wire.length, liveModelCalls: 0 }))
+  console.log(JSON.stringify({ cli: version, sdk: sdkVersion, callCount, thinking, transientTail, mixed, deferred, nonStream, unstreamed, captured, capturedLast, bareCall, inputValidation, distinctTools, sseDelayMs, followOn, resultKind, upstreamCalls: wire.length, liveModelCalls: 0 }))
 } finally {
   const evidence = process.argv.find(arg => arg.startsWith("--wire="))?.slice(7)
   if (evidence) writeFileSync(evidence, JSON.stringify(wire, null, 2) + "\n")

@@ -4486,68 +4486,122 @@ describe("Integration: passthrough early stop", () => {
   }
 
   for (const count of [2, 3]) {
-    it(`stream: hybrid ${count}-call checkpoint resumes first fragment with each real result once`, async () => {
-      const key = `hybrid-${count}`
-      const messages = [{ role: "user", content: "read every file" }]
-      const calls = Array.from({ length: count }, (_, index) => ({ type: "tool_use",
-        id: `hybrid-${index}`, name: "read", input: { file_path: `/file-${index}` } }))
-      const fragments = calls.map(call => assistantMessage([{ ...call, name: "mcp__oc__read" }]))
-      mockMessages = [messageStart("msg_hybrid"),
-        ...calls.flatMap((call, index) => [toolUseBlockStart(index, "mcp__oc__read", call.id),
-          inputJsonDelta(index, JSON.stringify(call.input)), blockStop(index)]),
+    for (const bareIndex of new Set([-1, 0, 1, count - 1])) {
+      it("stream: hybrid " + count + "-call bare=" + bareIndex + " checkpoint resumes first fragment with each real result once", async () => {
+        const key = "hybrid-" + count + "-bare-" + bareIndex
+        const messages = [{ role: "user", content: "read every file" }]
+        const calls = Array.from({ length: count }, (_, index) => ({ type: "tool_use",
+          id: `hybrid-${index}`, name: "read", input: { file_path: `/file-${index}` } }))
+        const toolName = (index: number) => index === bareIndex ? "read" : "mcp__oc__read"
+        const fragments = calls.map((call, index) => ({ ...assistantMessage([{ ...call, name: toolName(index) }]),
+          ...(index === bareIndex ? { test_skip_pre_tool_hook: true } : {}) }))
+        mockMessages = [messageStart("msg_hybrid"),
+          ...calls.flatMap((call, index) => [toolUseBlockStart(index, toolName(index), call.id),
+            inputJsonDelta(index, JSON.stringify(call.input)), blockStop(index)]),
+          messageDelta("tool_use"), messageStop(),
+          ...fragments.flatMap((fragment, index) => [fragment, index === bareIndex ? unavailableToolMessage(calls[index]!.id, "read") : userDenyMessage(calls[index]!.id)]),
+          { type: "result", subtype: "error_max_turns", is_error: true },
+        ]
+        mockTerminalError = new Error("Claude Code returned an error result: Reached maximum number of turns (1)")
+        const first = await post(app, { model: "opus[1m]", max_tokens: 400, stream: true,
+          tools: [READ_TOOL], messages }, key)
+        const body = await first.text()
+        expect(first.status).toBe(200)
+        expect(body).not.toContain("event: error")
+        expect(parseSSE(body).filter(row => row.event === "content_block_start")
+          .map(row => row.data.content_block).filter((block): block is { type: "tool_use"; id: string } =>
+            typeof block === "object" && block !== null && "type" in block && block.type === "tool_use" &&
+            "id" in block && typeof block.id === "string")
+          .map(block => block.id)).toEqual(calls.map(call => call.id))
+        expect(lookupSharedSession(key + "-" + TEST_RUN_ID)?.sdkMessageUuids?.[messages.length]).toBeNull()
+        mockTerminalError = undefined
+        mockMessages = [assistantMessage([{ type: "text", text: "all results received" }])]
+        const next = await post(app, { model: "opus[1m]", max_tokens: 400, stream: true,
+          tools: [READ_TOOL], messages: [...messages, { role: "assistant", content: calls },
+            { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
+              content: `REAL_CLIENT_RESULT_${call.id}` })) }],
+        }, key)
+        expect(await next.text()).toContain("all results received")
+        expect(capturedQueryParamsAll).toHaveLength(2)
+        expect(capturedQueryParams.options.resume).toBe(initialManagedSessionId())
+        expect(capturedQueryParams.options.resumeSessionAt).toBe(fragments[0]!.uuid)
+        const prompt = []
+        for await (const row of capturedQueryParams.prompt) prompt.push(row)
+        expect(prompt).toHaveLength(1)
+        expect(prompt[0].message.content[0]).toEqual({ type: "tool_result", tool_use_id: calls[0]!.id,
+          content: `REAL_CLIENT_RESULT_${calls[0]!.id}` })
+        const rendered = JSON.stringify(prompt)
+        for (const call of calls) expect(rendered.split(`REAL_CLIENT_RESULT_${call.id}`)).toHaveLength(2)
+        expect(rendered).not.toContain("Tool result missing due to internal error")
+        expect(rendered).not.toContain("No such tool available")
+        expect(rendered).not.toContain("<tool_use_error>")
+        for (const call of calls.slice(1)) {
+          expect(rendered).toContain("Previously called tool:")
+          expect(rendered).toContain(`Recorded tool result:`)
+          expect(rendered).toContain(call.id)
+        }
+        // The later native fragments were cut off by the hybrid rewind. Their
+        // UUIDs cannot address this consolidated client assistant on undo.
+        expect(lookupSharedSession(key + "-" + TEST_RUN_ID)?.sdkMessageUuids?.[messages.length]).toBeNull()
+        const undo = await post(app, { model: "opus[1m]", max_tokens: 400, stream: true,
+          tools: [READ_TOOL], messages: [...messages, { role: "assistant", content: calls },
+            { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
+              content: "EDITED_RESULT_" + call.id })) }],
+        }, key)
+        expect(await undo.text()).toContain("all results received")
+        expect(capturedQueryParams.options.resume).toBeUndefined()
+        expect(capturedQueryParams.options.resumeSessionAt).toBeUndefined()
+        const undoPrompt = await serializedPrompt(capturedQueryParams.prompt)
+        for (const call of calls) expect(undoPrompt).toContain("EDITED_RESULT_" + call.id)
+      })
+    }
+  }
+
+  for (const shape of ["grouped", "raw-tab", "incomplete-json", "undeclared", "wrong-name", "wrong-id", "deferred", "non-stream"] as const) {
+    it("mixed hybrid guard replays " + shape, async () => {
+      const key = "mixed-hybrid-control-" + shape
+      const messages = [{ role: "user", content: "read both files" }]
+      const calls = [
+        { type: "tool_use", id: "mixed-control-a", name: "read", input: { file_path: "/a" } },
+        { type: "tool_use", id: "mixed-control-b", name: shape === "undeclared" ? "not_declared" : "read", input: { file_path: "/b" } },
+      ]
+      const nativeCalls = calls.map((call, index) => ({ ...call, name: index === 0 ? "mcp__oc__read" : call.name }))
+      const tools = [READ_TOOL, ...(shape === "deferred" ? [{ name: "lsp_diagnostics", defer_loading: true,
+        input_schema: { type: "object", properties: { file: { type: "string" } } } }] : [])]
+      const fragments = shape === "grouped" ? [assistantMessage(nativeCalls)]
+        : nativeCalls.map(call => assistantMessage([call]))
+      mockMessages = [messageStart("msg_mixed_control"),
+        ...nativeCalls.flatMap((call, index) => [toolUseBlockStart(index, call.name, call.id),
+          inputJsonDelta(index, index !== 1 ? JSON.stringify(call.input) : shape === "raw-tab"
+            ? '{"file_path":"raw' + String.fromCharCode(9) + 'tab"}'
+            : shape === "incomplete-json" ? '{"file_path":' : JSON.stringify(call.input)), blockStop(index)]),
         messageDelta("tool_use"), messageStop(),
-        ...fragments.flatMap((fragment, index) => [fragment, userDenyMessage(calls[index]!.id)]),
+        ...fragments.map(fragment => ({ ...fragment, test_skip_pre_tool_hook: true })),
+        { type: "test_pre_tool_hook", tool_name: nativeCalls[0]!.name,
+          tool_use_id: calls[0]!.id, tool_input: calls[0]!.input },
+        userDenyMessage(calls[0]!.id),
+        unavailableToolMessage(shape === "wrong-id" ? "other-id" : calls[1]!.id,
+          shape === "wrong-name" ? "other-name" : calls[1]!.name),
         { type: "result", subtype: "error_max_turns", is_error: true },
       ]
       mockTerminalError = new Error("Claude Code returned an error result: Reached maximum number of turns (1)")
-      const first = await post(app, { model: "opus[1m]", max_tokens: 400, stream: true,
-        tools: [READ_TOOL], messages }, key)
-      const body = await first.text()
-      expect(first.status).toBe(200)
-      expect(body).not.toContain("event: error")
-      expect(parseSSE(body).filter(row => row.event === "content_block_start")
-        .map(row => row.data.content_block).filter((block): block is { type: "tool_use"; id: string } =>
-          typeof block === "object" && block !== null && "type" in block && block.type === "tool_use" &&
-          "id" in block && typeof block.id === "string")
-        .map(block => block.id)).toEqual(calls.map(call => call.id))
-      expect(lookupSharedSession(key + "-" + TEST_RUN_ID)?.sdkMessageUuids?.[messages.length]).toBeNull()
+      const first = await post(app, { model: "opus[1m]", max_tokens: 400, stream: shape !== "non-stream", tools, messages }, key)
+      await first.text()
+      expect(lookupSharedSession(key + "-" + TEST_RUN_ID)).toBeUndefined()
       mockTerminalError = undefined
-      mockMessages = [assistantMessage([{ type: "text", text: "all results received" }])]
-      const next = await post(app, { model: "opus[1m]", max_tokens: 400, stream: true,
-        tools: [READ_TOOL], messages: [...messages, { role: "assistant", content: calls },
+      mockMessages = [assistantMessage([{ type: "text", text: "replayed results" }])]
+      const next = await post(app, { model: "opus[1m]", max_tokens: 400, stream: true, tools,
+        messages: [...messages, { role: "assistant", content: calls },
           { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
-            content: `REAL_CLIENT_RESULT_${call.id}` })) }],
+            content: "REAL_CLIENT_RESULT_" + call.id })) }],
       }, key)
-      expect(await next.text()).toContain("all results received")
-      expect(capturedQueryParamsAll).toHaveLength(2)
-      expect(capturedQueryParams.options.resume).toBe(initialManagedSessionId())
-      expect(capturedQueryParams.options.resumeSessionAt).toBe(fragments[0]!.uuid)
-      const prompt = []
-      for await (const row of capturedQueryParams.prompt) prompt.push(row)
-      expect(prompt).toHaveLength(1)
-      expect(prompt[0].message.content[0]).toEqual({ type: "tool_result", tool_use_id: calls[0]!.id,
-        content: `REAL_CLIENT_RESULT_${calls[0]!.id}` })
-      const rendered = JSON.stringify(prompt)
-      for (const call of calls) expect(rendered.split(`REAL_CLIENT_RESULT_${call.id}`)).toHaveLength(2)
-      expect(rendered).not.toContain("Tool result missing due to internal error")
-      for (const call of calls.slice(1)) {
-        expect(rendered).toContain("Previously called tool:")
-        expect(rendered).toContain(`Recorded tool result:`)
-        expect(rendered).toContain(call.id)
-      }
-      // The later native fragments were cut off by the hybrid rewind. Their
-      // UUIDs cannot address this consolidated client assistant on undo.
-      expect(lookupSharedSession(key + "-" + TEST_RUN_ID)?.sdkMessageUuids?.[messages.length]).toBeNull()
-      const undo = await post(app, { model: "opus[1m]", max_tokens: 400, stream: true,
-        tools: [READ_TOOL], messages: [...messages, { role: "assistant", content: calls },
-          { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
-            content: "EDITED_RESULT_" + call.id })) }],
-      }, key)
-      expect(await undo.text()).toContain("all results received")
+      expect(await next.text()).toContain("replayed results")
       expect(capturedQueryParams.options.resume).toBeUndefined()
       expect(capturedQueryParams.options.resumeSessionAt).toBeUndefined()
-      const undoPrompt = await serializedPrompt(capturedQueryParams.prompt)
-      for (const call of calls) expect(undoPrompt).toContain("EDITED_RESULT_" + call.id)
+      const prompt = await serializedPrompt(capturedQueryParams.prompt)
+      for (const call of calls) expect(prompt.split("REAL_CLIENT_RESULT_" + call.id)).toHaveLength(2)
+      expect(prompt).not.toContain("No such tool available")
+      expect(prompt).not.toContain("<tool_use_error>")
     })
   }
 

@@ -221,8 +221,9 @@ try {
   const firstHistory = [...history, ...suffix]
   const first = await post(firstHistory)
   const firstBody = await first.text()
-  assert.equal(first.status, 200)
+  assert.equal(first.status, 200, firstBody)
   assert(!firstBody.includes("event: error"), firstBody)
+  assert(!firstBody.includes("hidden digest"), "hidden second-turn digest must not reach the client")
   assert(firstBody.includes('"stop_reason":"tool_use"'), firstBody)
   assert.equal(firstRequestCalls, digestExpected ? 2 : 1, "deferred flow must complete its hidden second model turn")
   const hybrid = (captured || (mixed && !deferred && !inputValidation)) && callCount > 1 && !nonStream && !unstreamed

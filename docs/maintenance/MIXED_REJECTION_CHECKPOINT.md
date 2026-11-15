@@ -1,5 +1,193 @@
 # Mixed and multi-turn rejected checkpoint evidence
 
+## JSON refused-call forwarding (2026-11-15)
+
+**Status: fixed and locally verified on `fix/json-refused-forwarding`, based on
+`bc7570ddbd8e62c33e0c02e2766a2ce24a3b13c1`; not integrated or activated.** This
+closes the normal-completion JSON forwarding gap recorded under *Reachability
+limits and safe controls* below (operator-approved scope, 2026-11-14). It does
+not change the multi-call replay policy or repair native multi-call resume.
+No live model calls, production/cache writes, service operations, push or PR.
+
+### Cause and retained candidate
+
+`src/proxy/server.ts`'s non-stream `isPassthroughTurn2` predicate (line 5414)
+counted SDK assistant **fragments** as turns. Once the first fragment supplied
+a `tool_use`, it suppressed every later fragment, including parallel calls
+refused before PreToolUse. Captured calls could be backfilled later, but bare
+refused calls had no capture to backfill. Eviction prevented unsafe resume but
+did not recover the missing client calls.
+
+Kept the carried-over one-line candidate: require
+`!assistantAddedForwardedCall` before suppressing a later JSON fragment. The
+existing non-stream tracker at lines 5301–5316 already recognizes additions to
+the visible call set and gates settlement on the streamed full set. Reuse that
+classification for content as it already does for assistant UUIDs. After
+settlement, the hidden digest cannot extend that set or overwrite `tool_use`.
+The similar tracker/UUID block at lines 6833–6876 belongs to the SSE iterator,
+not another JSON response path; it is unchanged. No new state or helper.
+
+Searched the existing tracker, JSON content assembly/capture backfill, SSE
+iterator, focused tests and offline harness. Those already supply the required
+mechanisms; no new harness flag or custom transport was necessary. Existing
+hidden-digest, late-metadata, duplicate, turn-2 suppression, kill-switch,
+single-call checkpoint and publication controls remain GREEN in the focused
+five-file run. No genuinely new product or architecture decision was taken.
+
+### RED/GREEN: eight fragmented-refusal regressions
+
+Command (from the worktree):
+
+```sh
+bun test src/__tests__/passthrough-early-stop-integration.test.ts --timeout 30000 --test-name-pattern 'fragmented refused batch forwards every call'
+```
+
+RED temporarily removes only the candidate server line. `git diff --quiet --
+src/proxy/server.ts` exits 0, proving the implementation is exactly bc7570dd;
+tests remain present. GREEN restores the line. Every case asserts ordered ID /
+input equality, `tool_use`, maxTurns 4, canonical drain with no digest leak,
+eviction, then fresh replay of each real result exactly once, without the CLI
+rejection. `lateMetadata=true` places every refusal before the final assistant
+fragments, so settlement must wait for the full streamed call set.
+
+| stream | calls | lateMetadata | RED | GREEN |
+|---|---:|---|---|---|
+| false | 2 | false | FAIL: only call 1 | PASS |
+| false | 2 | true | FAIL: only call 1 | PASS |
+| false | 3 | false | FAIL: only call 1 | PASS |
+| false | 3 | true | FAIL: only call 1 | PASS |
+| true | 2 | false | PASS | PASS |
+| true | 2 | true | PASS | PASS |
+| true | 3 | false | PASS | PASS |
+| true | 3 | true | PASS | PASS |
+
+RED exits **1**, **4 pass / 4 fail**, 82 assertions. GREEN exits **0**,
+**8 pass / 0 fail**, 124 assertions, 232 filtered out. The JSON failures are at
+exact delivered-call equality, not at mapping or follow-up assertions.
+
+### RED/GREEN: real CLI, offline JSON
+
+Tuple: Linux x64, Bun 1.3.14, Agent SDK 0.2.141, native Claude Code 2.1.322.
+All harness rows below use this command prefix, followed by the row's flags:
+
+```sh
+bun /srv/dev/ai/meridian-wt-json-forwarding/scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322
+```
+
+Final matrix runs use `/mnt/ai-scratch/meridian-json-forwarding/` as cwd so the
+harness's automatically removed HOME/config/transcript fixture lives on disk.
+Initial RED/GREEN probes ran from the worktree and removed their disposable
+fixtures too. This harness uses real HTTP handling, SDK, CLI refusals and CLI
+transcripts, but only a canned loopback SSE upstream and dummy API key.
+
+| Arguments | RED exit / result | GREEN exit / result |
+|---|---|---|
+| `--deferred --non-stream --calls=2` | 1: only `toolu_offline`, missing `toolu_offline_1` | 0: exact 2/2 calls, all real results replayed |
+| `--deferred --non-stream --calls=3` | 1: only `toolu_offline`, missing calls 2–3 | 0: exact 3/3 calls, all real results replayed |
+
+Both REDs reach `assert.deepEqual` on the complete client call set, with
+`checkpointRetained:false` and `firstRequestCalls:2`. Both GREENs use three
+upstream requests total (tool turn, hidden digest, fresh follow-up), retain no
+mapping, and print:
+
+```text
+PASS follow-up: fresh replay, not a resumed continuation; real client result for every call; no CLI rejection
+```
+
+The harness already asserts exact calls/inputs/order, stop reason, transcript
+refusals, replay versus resume, real result per ID, no placeholders, and exact
+upstream counts. Added an explicit assertion that `hidden digest` never
+appears in the first client response, plus HTTP-body diagnostics on unexpected
+status. The REDs were also repeated after adding the digest assertion; both
+still fail at exact call equality. Implementation bytes were restored in a
+`finally` block and checked with `IMPLEMENTATION_RESTORED True`.
+
+### Final offline real-CLI matrix
+
+The union of the earlier final matrices is the documented 19-row set. All 19
+passed, as did the two new JSON shapes: **21 pass / 0 fail**, runner exit **0**.
+The original 19 and the new JSON rows also passed in the initial run before
+that runner reached the additional capped controls described below. Every
+successful row reports `liveModelCalls:0`, matches exact expected client calls,
+checks every returned real result upstream, excludes CLI rejection text and
+internal-error placeholders, and permits no retry or extra digest. Every
+unstreamed row reports zero SDK partial events and the unstreamed envelope.
+
+| Arguments | Exit | Upstream requests | Client calls | Checkpoint |
+|---|---:|---:|---:|---|
+| default | 0 | 2 | 1 | retained |
+| `--thinking --calls=1` | 0 | 2 | 1 | retained |
+| `--thinking --calls=3` | 0 | 2 | 3 | evicted |
+| `--mixed --calls=2` | 0 | 2 | 2 | evicted |
+| `--mixed --calls=2 --input-validation` | 0 | 2 | 2 | evicted |
+| `--deferred --calls=2` | 0 | 3 | 2 | evicted |
+| `--deferred --calls=2 --mixed --captured-last --non-stream` | 0 | 2 | 2 | evicted |
+| `--deferred --calls=1` | 0 | 3 | 1 | evicted |
+| `--deferred --calls=1 --non-stream` | 0 | 3 | 1 | evicted |
+| `--deferred --calls=1 --input-validation` | 0 | 3 | 1 | evicted |
+| `--captured --calls=1` | 0 | 2 | 1 | retained |
+| `--captured --calls=2` | 0 | 2 | 2 | evicted |
+| `--captured --calls=3` | 0 | 2 | 3 | evicted |
+| `--captured --calls=3 --sse-delay-ms=25 --distinct-tools` | 0 | 2 | 3 | evicted |
+| `--unstreamed --deferred --captured --calls=1` | 0 | 2 | 1 | retained |
+| `--unstreamed --deferred --captured --calls=2` | 0 | 2 | 2 | evicted |
+| `--unstreamed --deferred --captured --calls=3` | 0 | 2 | 3 | evicted |
+| `--unstreamed --deferred --mixed --calls=2` | 0 | 2 | 1 of 2 | evicted |
+| `--unstreamed --deferred --mixed --calls=2 --captured-last` | 0 | 2 | 1 of 2 | evicted |
+| `--deferred --non-stream --calls=2` | 0 | 3 | 2 | evicted |
+| `--deferred --non-stream --calls=3` | 0 | 3 | 3 | evicted |
+
+The unstreamed mixed subset remains the existing assistant-only SSE forwarding
+limit; this JSON patch neither broadens that envelope nor claims all upstream
+calls are delivered there.
+
+### Gates, extra controls and remaining boundaries
+
+```sh
+bun test src/__tests__/proxy-passthrough-deny-abort.test.ts src/__tests__/proxy-stream-deny-hold.test.ts src/__tests__/passthrough-early-stop-integration.test.ts src/__tests__/passthrough-early-stop.test.ts src/__tests__/silent-turn-recovery.test.ts --timeout 30000
+env -u TMPDIR npm test
+npm run typecheck
+npm run build
+git diff --check
+```
+
+| Check | Exit | Concrete result |
+|---|---:|---|
+| Five focused files | 0 | 363 pass, 0 fail, 2826 assertions |
+| Full `npm test`, default TMPDIR, 1500 s command timeout | 0 | 9090 pass, 0 fail, 28 skip, 50570 assertions across all 32 declared groups |
+| First full-suite group | 0 | 8260 pass, 28 skip, 0 fail; `Ran 8288 tests across 488 files. [532.77s]` |
+| `npm run typecheck` | 0 | `tsc --noEmit`, no diagnostics |
+| `npm run build` | 0 | Bundled Node entrypoints; `fix-bun-exports: patched 2 file(s)`; certified local build 1 |
+| `git diff --check` | 0 | no whitespace errors |
+
+No test gate failed. The 28 skips are the existing unsupplied bookkeeping
+compatibility tarball cases (27) and Windows-only PID-reuse case (1).
+
+**Separate pre-existing capped JSON recovery limit, not fixed:** additional
+`--non-stream --calls=2` and `--non-stream --calls=3` controls (without
+`--deferred`) each exit **1** with HTTP 500 and
+`Claude Code returned an error result: Reached maximum number of turns (1)`.
+Both fail identically on candidate and on exact bc7570dd `server.ts` (verified
+by `git diff --quiet` while the candidate line is removed). The non-stream
+catch requires positive PreToolUse capture for tool-use error recovery; bare
+refusals have none. This is not the normal-success per-fragment suppression
+fixed here. No error-recovery policy was changed. The initial extended runner
+stopped at the first extra capped control; the isolated baseline/candidate
+checks cover both counts, and the complete required 21-row matrix was rerun
+successfully with the final harness diagnostics.
+
+Evidence logs/exit files and machine-readable matrix rows are retained under
+`/mnt/ai-scratch/meridian-json-forwarding/evidence/`; this committed record and
+the maintained harness preserve the reproducible evidence beyond scratch.
+No installed client, live model, prompt-cache billing or spontaneous no-partial
+event fallback was qualified. The repository's actual-client/live-model and
+E41 cache gates remain unperformed under the explicit no-live instruction;
+the approved affected-flow evidence here is the offline real-CLI harness.
+Absent-boundary reachability, native multi-call resume, and the unstreamed SSE
+rejected-call subset are not resolved. Cross-vendor independent review was not
+performed (no governed reviewer tool exposed); no review pass is claimed.
+Integration/publication/activation are expressly outside this task.
+
 ## Resume mixed name-dispatch batches (CLI 2.1.322 / SDK 0.2.141)
 
 **Current refinement; supersedes the mixed-batch replay conclusions below only
@@ -219,6 +407,7 @@ controls are the evidence used here; independent review, CI and any future
 activation remain separate gates. `uam_status` was attempted but unavailable
 (`command not found`); inspected process working directories confirmed the
 parallel JSON sessions, not a fleet-wide all-clear.
+
 
 ## Wire result-shape gate: errors, images, ordering and incomplete results
 
@@ -1170,8 +1359,10 @@ No new product/architecture choice was made: this applies the explicitly
 approved fallback. Exact CLI-internal cause remains undetermined; native
 multi-call resume is not repaired or qualified. Full replay cannot restore
 SDK-only thinking absent from client history and still follows existing replay
-budgeting. The separate real-CLI JSON parallel forwarding and absent-boundary
-reachability limits described below are not repaired. Cross-vendor review,
+budgeting. This fallback did not repair the separate JSON forwarding or
+absent-boundary reachability limits below. The JSON normal-completion gap is
+now closed by the 2026-11-15 follow-up above; absent-boundary reachability
+remains unqualified. Cross-vendor review,
 actual live-model/client acceptance, integration and activation remain with the
 parent; live calls and production changes were explicitly prohibited here.
 Temporary local logs are summarized here and removed at handoff; no test units
@@ -1386,8 +1577,9 @@ No new product/architecture choice was made. The owning operator retains the
 separate decision about remediation of the all-captured resume defect.
 `git diff --check` passes. No push, build, install, full suite, restart, service
 request or live model call occurred. Independent final review and affected
-actual-model/client acceptance remain unperformed; the separate non-stream
-parallel forwarding and absent-boundary reachability limits below remain open.
+actual-model/client acceptance remain unperformed. The separate non-stream
+normal-completion forwarding limit was later closed by the 2026-11-15 follow-up
+above; absent-boundary reachability remains unqualified.
 
 ## Capture-proof follow-up — BLOCKED, not qualified
 
@@ -1409,8 +1601,9 @@ paths, and `withReachability` does not buffer partial messages in that mode.
 However, **real CLI 2.1.322 absent-boundary reachability remains unresolved**:
 no passive SDK event-order witness was completed before the stop below. Do
 not infer impossibility from the requested option. The independent emitted-ID
-check fails closed regardless; repairing JSON's existing missing parallel-call
-forwarding is not part of this patch.
+check fails closed regardless. JSON's missing parallel-call forwarding was
+outside that capture-proof patch and is closed for normal completion by the
+2026-11-15 follow-up above.
 
 ### Stop condition: all-captured real-CLI result loss
 
@@ -1580,11 +1773,11 @@ in fresh replay and no CLI rejection.
 
 Reachability limits and safe controls:
 
-- Real CLI JSON with two bare/rejected calls and a second-turn digest returns
-  only the first tool call. The harness correctly fails its exact client-call-set
-  assertion before a continuation can be qualified. With the current non-stream
-  per-assistant-fragment suppression, the mapping is already evicted. Repairing
-  missing JSON tool-call forwarding is separate from this checkpoint guard.
+- **Closed 2026-11-15:** real CLI JSON with two or three bare/rejected calls
+  and a second-turn digest now returns the entire ordered batch and replays all
+  real results, with mapping eviction unchanged. The original checkpoint guard
+  left this per-assistant-fragment forwarding defect open; see the dated JSON
+  RED/GREEN evidence at the start of this record.
 - The focused mocked-SDK tests supply a full parallel assistant and hidden
   second-turn `result:success` on both response paths, so both normal completion
   guards are covered even where CLI fragmentation prevents the exact JSON shape.
@@ -1642,6 +1835,7 @@ exclude retries and unintended extra digests.
 The durable executable probe is the committed offline harness; this record keeps
 sanitized red/green evidence beyond local scratch logs. No mocks qualify live
 model naming, prompt-cache billing, or a full Pi/OpenCode client flow.
-The real-CLI JSON two-rejected-call forwarding limitation above remains open.
+The real-CLI JSON normal-completion forwarding limitation was subsequently
+closed on 2026-11-15; see the JSON RED/GREEN evidence at the start of this record.
 Independent final patch review and any integration/publication/activation belong
 to the parent workflow; only a local branch commit is authorized here.

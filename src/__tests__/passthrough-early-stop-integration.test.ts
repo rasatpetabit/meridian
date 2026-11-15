@@ -4686,6 +4686,80 @@ describe("Integration: passthrough early stop", () => {
     })
   }
 
+  for (const stream of [false, true]) for (const count of [2, 3]) for (const lateMetadata of [false, true]) {
+    it(`fragmented refused batch forwards every call (${JSON.stringify({ stream, count, lateMetadata })})`, async () => {
+      const sessionKey = `fragmented-refused-${stream}-${count}-${lateMetadata}-${TEST_RUN_ID}`
+      usedSessionKeys.add(sessionKey)
+      const headers = { "x-meridian-agent": "pi", "user-agent": "pi/1.4.0", "x-session-affinity": sessionKey }
+      const calls = Array.from({ length: count }, (_, index) => ({
+        type: "tool_use", id: `refused-${index}`, name: "read", input: { file_path: `/file-${index}` },
+      }))
+      const fragments = calls.map(call => ({ ...assistantMessage([call]), test_skip_pre_tool_hook: true }))
+      const refusals = calls.map(call => unavailableToolMessage(call.id, call.name))
+      const tools = [READ_TOOL, { name: "lsp_diagnostics", defer_loading: true,
+        input_schema: { type: "object", properties: { file: { type: "string" } } } }]
+      mockMessages = [
+        messageStart("msg_fragmented_refused"),
+        ...calls.flatMap((call, index) => [
+          toolUseBlockStart(index, call.name, call.id), inputJsonDelta(index, JSON.stringify(call.input)),
+          ...(lateMetadata ? [] : [fragments[index]!]), blockStop(index),
+        ]),
+        messageDelta("tool_use"), messageStop(),
+        ...(lateMetadata ? [fragments[0]!, ...refusals, ...fragments.slice(1)] : refusals),
+        messageStart("msg_hidden_digest"), textBlockStart(0), textDelta(0, "hidden digest"), blockStop(0),
+        messageDelta("end_turn"), messageStop(), assistantMessage([{ type: "text", text: "hidden digest" }]),
+        { type: "result", subtype: "success", is_error: false },
+      ]
+      const messages = [{ role: "user", content: "read every file" }]
+      const response = await post(app, {
+        model: "opus[1m]", max_tokens: 400, stream, tools, messages,
+      }, "unused", headers)
+      const body = await response.text()
+      expect(response.status).toBe(200)
+      expect(body).not.toContain("hidden digest")
+      expect(body).not.toContain("event: error")
+      let delivered: unknown[]
+      if (stream) {
+        const events = parseSSE(body).map(row => ({ ...row, data: row.data as {
+          index?: number
+          content_block?: Record<string, unknown>
+          delta?: { type?: string; partial_json?: string; stop_reason?: string }
+        } }))
+        delivered = events.filter(row => row.event === "content_block_start").map(row => ({
+          ...row.data.content_block,
+          input: JSON.parse(events.filter(delta => delta.event === "content_block_delta" &&
+            delta.data.index === row.data.index && delta.data.delta?.type === "input_json_delta")
+            .map(delta => delta.data.delta?.partial_json).join("")),
+        }))
+        expect(events.find(row => row.event === "message_delta")?.data.delta?.stop_reason).toBe("tool_use")
+      } else {
+        const json = JSON.parse(body)
+        delivered = json.content
+        expect(json.stop_reason).toBe("tool_use")
+      }
+      expect(delivered).toEqual(calls)
+      expect(capturedQueryParamsAll[0].options.maxTurns).toBe(4)
+      expect(yieldedCount).toBe(mockMessages.length)
+      expect(lookupSharedSession(sessionKey)).toBeUndefined()
+
+      mockMessages = [assistantMessage([{ type: "text", text: "files read" }])]
+      const next = await post(app, {
+        model: "opus[1m]", max_tokens: 400, stream: false, tools,
+        messages: [...messages, { role: "assistant", content: delivered },
+          { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
+            content: `REAL_CLIENT_RESULT_${call.id}` })) }],
+      }, "unused", headers)
+      expect(next.status).toBe(200)
+      await next.text()
+      expect(capturedQueryParamsAll).toHaveLength(2)
+      expect(capturedQueryParamsAll[1].options.resume).toBeUndefined()
+      expect(capturedQueryParamsAll[1].options.resumeSessionAt).toBeUndefined()
+      const replay = await serializedPrompt(capturedQueryParamsAll[1].prompt)
+      for (const call of calls) expect(replay.split(`REAL_CLIENT_RESULT_${call.id}`)).toHaveLength(2)
+      expect(replay).not.toContain("No such tool available")
+    })
+  }
+
   // Uncaptured calls must fail closed regardless of the CLI refusal wording.
   for (const shape of [
     { stream: true, deferred: false, mixed: true, inputRejected: true, single: false },

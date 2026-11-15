@@ -5429,6 +5429,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 const isPassthroughTurn2 =
                   passthrough &&
                   assistantMessages > 1 &&
+                  !assistantAddedForwardedCall &&
                   contentBlocks.some((b) => b.type === "tool_use")
 
                 if (isPassthroughTurn2) {

@@ -131,6 +131,19 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   $8/M input, $40/M output, $0.20/M cache read, $10/M 5-min cache write
   (https://platform.claude.com/docs/en/about-claude/pricing); historical
   Fable/Mythos generations keep their FABLE rates.
+- **JSON passthrough preserves the complete refused tool batch.** Claude Code
+  may split one model turn into one assistant fragment per parallel call, even
+  when a CLI refusal arrives before the final fragment's metadata. A fragment
+  that extends the tracked client-call set belongs to the visible tool turn,
+  not the hidden digest merely because another assistant message preceded it.
+  On normal JSON completion, forward every refused call with its original ID,
+  input and order, and `stop_reason: "tool_use"`, matching SSE delivery. Drain
+  the hidden second turn without exposing its content or replacing the visible
+  stop reason. Multi-call mappings still evict and the next request replays
+  every real client result; this changes neither SSE behavior nor checkpoint
+  eligibility. The separate JSON `error_max_turns` recovery limit remains
+  outside this normal-completion fix. See the dated JSON forwarding evidence in
+  `docs/maintenance/MIXED_REJECTION_CHECKPOINT.md`.
 - **A canonical single-turn name-dispatch refusal can retain a keyed tool
   checkpoint without PreToolUse capture.** The CLI can reject a bare client
   tool name before invoking hooks even though its assistant UUID and rejection

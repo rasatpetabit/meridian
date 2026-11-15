@@ -1,5 +1,333 @@
 # Mixed and multi-turn rejected checkpoint evidence
 
+## Cache-prefix regression: first-fragment hybrid continuation (2026-11-14 incident)
+
+**Current policy; supersedes the all-multi-call replay conclusions below only
+for proven all-captured streamed batches.** Local implementation on
+`fix/multicall-resume-cache`, based on `fork/main` **bc7570dd**. No push, merge,
+PR, install, service action, live-cache write or live model call. The separate
+`fix/json-refused-forwarding` worktree is untouched; it overlaps this harness,
+HTTP tests and `server.ts`, so the parent must reconcile both lines of work.
+
+### Production motivation and version witness
+
+Read-only sources: `/mnt/ai-scratch/meridian-cache-diag/journal.txt` and
+`req.json`, after 13:59:46 PST. Independently recomputed from the digest:
+**143 new-lineage requests with usage, 139 writing >=100k tokens, 37,302,295
+cache-write tokens**. The **2269 continuation requests** had a weighted cache
+read fraction of **99.4452%** (`read/(read+write)`, rounded journal values).
+The parent's 81/81 captured multi-call evictions explain repeated full-history
+rewrites, not a provider cache failure. Example `06ad8ea0-7335-4ae2-9579-fce71df744d4`
+paid ~353k write tokens after retaining only the ~63k system/tools prefix.
+These are measured pre-fix token costs, not a dollar estimate or a claim of
+post-install savings.
+
+The current service is PID **529723**, unchanged through verification.
+Journal line **31845** is that PID's startup witness:
+
+```text
+2026-11-14T20:10:46-08:00 ... node[529723]: Claude executable: /home/ras/.local/share/claude/versions/2.1.322 (resolved via custom)
+```
+
+The same version appears at the original 13:59 install (line 7764) and the
+17:10 restart (line 21355). Observed running CLI children at task entry also
+used this exact executable. `/home/ras/.local/bin/claude` still resolves to it.
+All probes below use real **CLI 2.1.322**, **Agent SDK 0.2.141**, Bun 1.3.14,
+Linux x64, loopback scripted upstream and disposable state under
+`/mnt/ai-scratch/meridian-multicall-cache/`. No provider traffic is involved.
+
+### Design and scope
+
+Design A passed; Design B was unnecessary. Track the first single-tool
+assistant fragment separately from the unchanged final/undo UUID. Freeze the
+first UUID only when every streamed call is settled and captured, then apply
+the usual canonical, exact-client-batch publication guard. A new optional
+internal `passthroughNativeToolCallId` marker distinguishes this proof from
+legacy last-fragment checkpoints. JSON and SQLite mapping history, cache
+reconstruction, normal/priority publication and checkpoint clearing preserve
+that distinction; no SQL schema or public API change is needed.
+
+On the next complete-result continuation, send exactly one SDK user input:
+the first call's native result, then each later call and its real result in
+the **existing fresh-replay record format**, then queued ordinary user
+content. No new system instruction or tools change is introduced. Registered
+MCP names are rendered by the existing tool-name renderer. Images and other
+structured result payloads stay structured, and `is_error` stays attributed.
+The existing system prompt already explains that these are completed
+client-side steps. No client-visible calls are suppressed or repeated. A consolidated hybrid
+assistant has no complete native undo boundary: publish a null rollback UUID
+for that client slot, rather than preserving the discarded last-fragment
+UUID. The new HTTP tests prove that editing its results safely replays on
+undo; older ordinary undo boundaries and single-call undo are unchanged.
+
+**Covered:** ordinary streamed all-captured multi-call completion and its
+canonical one-turn `max_turns` drain recovery; deferred/PostToolBatch normal
+streamed completion. Both two-/three-call batches and repeated multi→multi→
+single sequences are verified against the real CLI.
+
+**Unchanged:** single-call retention and its canonical single name-dispatch
+exception; mixed/uncaptured replay; JSON multi-call replay; assistant-only /
+unstreamed-SSE multi-call replay; silent-turn-recovery multi-call replay;
+legacy multi-call mappings without the marker; invalid, partial, duplicate or
+mismatched result-set replay. A missing, ambiguous, grouped-multiple-tool first
+fragment cannot prove the singleton rewind shape and fails closed to replay.
+Real CLI 2.1.322 produces the singleton per-tool fragments in every qualified
+probe. Last-fragment native multi-call resume is **not** restored or qualified;
+the earlier four failed probes and unknown CLI-internal cause remain valid.
+
+### RED before the fix
+
+The harness was extended before production source edits. From this worktree,
+`--source-root` loads unchanged tracked sources from the primary checkout at
+bc7570dd (its only dirt was unrelated untracked `.pi/`). It never writes there:
+
+```sh
+export MERIDIAN_E2E_SCRATCH=/mnt/ai-scratch/meridian-multicall-cache
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322 --source-root=/srv/dev/ai/meridian --captured --calls=2 --wire=$MERIDIAN_E2E_SCRATCH/red-2-wire.json
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322 --source-root=/srv/dev/ai/meridian --captured --calls=3 --wire=$MERIDIAN_E2E_SCRATCH/red-3-wire.json
+```
+
+Both exit **1**, with the same decisive output (client counts 2 and 3):
+
+```text
+SHAPE ... "captured":true,..."checkpointRetained":false,"firstRequestCalls":1
+CLIENT_CALLS {"upstream":2,"expected":2,"received":2}
+AssertionError: R1: upstream message prefix changed
+```
+
+The HTTP regression was also added first:
+
+```sh
+bun test src/__tests__/passthrough-early-stop-integration.test.ts --test-name-pattern 'hybrid.*checkpoint resumes'
+# exit 1: 0 pass / 2 fail / 232 filtered; expected original SDK session UUID, received undefined
+```
+
+### GREEN: exact content prefix and real results
+
+```sh
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322 --captured --calls=2
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322 --captured --calls=3
+# each exit 0, 2 upstream requests, liveModelCalls:0
+```
+
+```text
+SHAPE ... "captured":true,..."checkpointRetained":true,"firstRequestCalls":1
+PASS lineage: exact streamed assistant plus client results is continuation
+PASS R1: system, tools and messages retain the complete upstream prefix
+RESUME_RESULTS {"real":["toolu_offline"],"internalError":[]}
+PASS hybrid continuation: first native result plus completed-call records; every real result exactly once
+```
+
+Only call 1 is native. Later real results are asserted separately in their
+completed-call records, exactly once each, with no orphan native assistant
+calls, placeholders, InputValidationError or CLI refusal. The full system,
+tools and previous messages are compared, not just the system/tools prefix.
+**Representation caveat:** CLI 2.1.322 changes its environment message's
+`content` from a singleton marked text-block array to a string when moving
+its cache marker. The bytes of that text are unchanged (also true for the
+single-call control). The checker removes `cache_control` and canonicalizes
+only string vs text-block content representation. It does not normalize text,
+ignore environment content or claim byte-identical raw JSON. A demand for
+literal JSON equality beyond identical prompt content is not met by this CLI.
+
+Follow-on commands (each exit **0**, **four** upstream requests, no retry):
+
+```sh
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322 --captured --calls=2 --follow-on
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322 --captured --calls=3 --thinking --follow-on
+```
+
+```text
+PASS follow-on R1/R2: settled 2 calls; existing prefix unchanged; every real result exactly once
+PASS follow-on R1/R2: settled 1 calls; existing prefix unchanged; every real result exactly once
+# three-call command prints "settled 3 calls", then "settled 1 calls"
+```
+
+Every follow-up compares against the **immediately previous complete upstream
+request**, including prior native results and hybrid records. Telemetry must
+mark every follow-up resumed. Distinct IDs/results ensure prior results remain
+exactly once, too. Exact sanitized wire bodies and commands are retained in
+`matrix-*-wire.json`, `matrix-*.log` and `matrix-results.json` under the evidence
+root; RED bodies/logs are `red-{2,3}-wire.json` and `red-{2,3}.log`.
+
+### Exact three-call follow-up user message
+
+From the real upstream capture for the three-call row, including the CLI's
+final cache marker. These are the complete text blocks the model sees for
+calls 2 and 3; the renderer adds no summary or paraphrase of their results:
+
+```json
+{
+  "role": "user",
+  "content": [
+    {
+      "type": "tool_result",
+      "tool_use_id": "toolu_offline",
+      "content": "REAL_CLIENT_RESULT[toolu_offline]"
+    },
+    {
+      "type": "text",
+      "text": "[Assistant: Previously called tool: {\"id\":\"toolu_offline_1\",\"name\":\"mcp__oc__read\",\"input\":{\"file_path\":\"new-1\"}}]"
+    },
+    {
+      "type": "text",
+      "text": "Recorded tool result: {\"tool_use_id\":\"toolu_offline_1\",\"is_error\":false}"
+    },
+    {
+      "type": "text",
+      "text": "REAL_CLIENT_RESULT[toolu_offline_1]"
+    },
+    {
+      "type": "text",
+      "text": "[Assistant: Previously called tool: {\"id\":\"toolu_offline_2\",\"name\":\"mcp__oc__read\",\"input\":{\"file_path\":\"new-2\"}}]"
+    },
+    {
+      "type": "text",
+      "text": "Recorded tool result: {\"tool_use_id\":\"toolu_offline_2\",\"is_error\":false}"
+    },
+    {
+      "type": "text",
+      "text": "REAL_CLIENT_RESULT[toolu_offline_2]",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    }
+  ]
+}
+```
+
+### Final offline matrix and local gates
+
+All original 19 rows below were rerun on final source; only the three
+all-captured **streamed** multi-call rows change from eviction to retention.
+The five extra rows protect JSON replay and prove deferred and follow-on
+continuations. **24 pass / 0 fail**, all exit **0**, all `liveModelCalls:0`.
+Each command shares the GREEN CLI prefix above:
+
+| Arguments | Exit | Upstream requests | Checkpoint |
+|---|---:|---:|---|
+| default | 0 | 2 | retained |
+| `--thinking --calls=1` | 0 | 2 | retained |
+| `--thinking --calls=3` | 0 | 2 | evicted |
+| `--mixed --calls=2` | 0 | 2 | evicted |
+| `--mixed --calls=2 --input-validation` | 0 | 2 | evicted |
+| `--deferred --calls=2` | 0 | 3 | evicted |
+| `--deferred --calls=2 --mixed --captured-last --non-stream` | 0 | 2 | evicted |
+| `--deferred --calls=1` | 0 | 3 | evicted |
+| `--deferred --calls=1 --non-stream` | 0 | 3 | evicted |
+| `--deferred --calls=1 --input-validation` | 0 | 3 | evicted |
+| `--captured --calls=1` | 0 | 2 | retained |
+| `--captured --calls=2` | 0 | 2 | retained |
+| `--captured --calls=3` | 0 | 2 | retained |
+| `--captured --calls=3 --sse-delay-ms=25 --distinct-tools` | 0 | 2 | retained |
+| `--unstreamed --deferred --captured --calls=1` | 0 | 2 | retained |
+| `--unstreamed --deferred --captured --calls=2` | 0 | 2 | evicted |
+| `--unstreamed --deferred --captured --calls=3` | 0 | 2 | evicted |
+| `--unstreamed --deferred --mixed --calls=2` | 0 | 2 | evicted |
+| `--unstreamed --deferred --mixed --calls=2 --captured-last` | 0 | 2 | evicted |
+| `--captured --calls=2 --non-stream` | 0 | 2 | evicted |
+| `--captured --calls=3 --non-stream` | 0 | 2 | evicted |
+| `--captured --calls=2 --deferred` | 0 | 2 | retained |
+| `--captured --calls=3 --thinking --follow-on` | 0 | 4 | retained |
+| `--captured --calls=2 --follow-on` | 0 | 4 | retained |
+
+- New HTTP tests: **2 pass / 0 fail**. Combined early-stop HTTP/pure suite:
+  **319 pass / 0 fail**, 2604 assertions. Additional direct hybrid helper
+  tests: **5 pass / 0 fail**, 24 assertions; cover ordering, exact literal
+  result text, errors/media, missing/ambiguous echoes and publication vetoes.
+- JSON/SQLite store contract: **8 pass / 0 fail**, 66 assertions, including
+  hybrid migration, SQL write/read, checkpoint clearing and export. Deny-hold
+  suite: **4 pass / 0 fail**, 26 assertions, including fast queued continuation
+  and interleaved per-call echoes.
+- `npm test`: **exit 0**, run in foreground with a 1800-second timeout.
+  Across all isolated commands: **9091 pass / 28 skip / 0 fail**. Initial bulk
+  command: 8265 pass / 28 skip / 0 fail, 489 files, 552.29 s; isolated HTTP
+  file: 234 pass / 0 fail. Skips are the existing unavailable
+  `BOOKKEEPING_COMPAT_TARBALL` old-bundle compatibility cases.
+- `npm run typecheck`: **exit 0**. `npm run build`: **exit 0**;
+  `Certified local build 2 (684bf7e7-7cf6-44cd-83b9-ece8f435a479)`.
+- Development failures were corrected, not bypassed: two deny-hold assertions
+  still demanded replay and now assert the hybrid session/first UUID and
+  structured input. Final self-review also found and corrected the stale
+  last-fragment undo UUID risk above before rerunning every local gate and
+  the complete offline matrix. The first full run was 8263 pass / 28 skip / 2 fail;
+  an intervening pretest caught TypeScript's narrowing of a reset global mock
+  variable. The store test originally tried writing after completed export;
+  it now validates clearing before export (runtime correctly refuses an
+  exported store). Final full rerun and focused tests above are green.
+
+Evidence logs: `npm-test-final.log`, `typecheck-final.log`, `build-final.log`,
+`integration-full.log`, `store-contract.log`, `deny-hold.log`,
+`red-integration.log`, `green-integration.log`, `last-focused.log` (final
+whitespace-only test cleanup: exit 0, 6 pass / 0 fail, 225 assertions), and the
+initial failed `npm-test.log`, plus the matrix/RED artifacts above. Relative
+SPEC links and `git diff --check` also passed. This committed
+record preserves before/after findings even if scratch evidence is removed.
+No hooks were skipped. Independent cross-vendor review is not claimed: this
+bounded engineer surface exposes no subagent/advisor/reviewer tool. The
+parent owns review before landing, CI, integration and activation. UAM was
+also unavailable here (`uam_status: command not found`); isolated worktree
+and read-only concurrency checks are not a global all-clear.
+
+### Separate journal finding: captured=0 and apparently single-call evictions
+
+`captured` is the number of **PreToolUse hook captures**, not the model's or
+client's complete tool-call count. After the install the journal has **121**
+`reason=drain_error` evictions grouped by capture count:
+**0:36, 1:4, 2:72, 3:7, 4:2**. All observed terminations are the normal
+one-turn `max_turns` boundary, not evidence of an I/O drain failure.
+
+The four `captured=1` cases are **not single-call turns**. Matching each
+request's full logged history-shape prefix to its earliest subsequent
+extended history gives **two tool_use blocks and two real-result slots**:
+
+| Evicted request | Eviction journal line | Following request / line |
+|---|---:|---|
+| `4c81f932-b7ff-4828-a263-d21d7b50eeaf` | 9404 | `aa3eee61-7721-4fb1-a931-50d76c06e490` / 9414 |
+| `0ae1043b-b0f5-4c0b-a67f-5910f2fd5391` | 14819 | `91dac9d6-f975-4448-9d64-b3f66f672c44` / 14823 |
+| `168e932e-103c-4939-9a83-470cf53c5e6d` | 32163 | `ebbd5307-f914-462a-a396-ee533440bd91` / 32193 |
+| `4e195e35-e255-4f23-93bf-a00c4698fd5a` | 33669 | `4bd19782-6489-4f38-a0ca-fccf1fe1a9b6` / 33679 |
+
+Thus these are mixed two-call turns (one captured, one not), which fail both
+the capture guard and the old multi-call guard. Their eviction is expected
+under the retained mixed-batch safety policy, not a single-call regression.
+No code was changed for this finding.
+
+For `captured=0`, **35/36** have a matching follow-up within the extract:
+**34** echo two calls/results, **one** echoes three. For example
+`eb23e33a-cdac-4cde-ae8c-c03568f98584` has zero captures but its next request
+`a5d9ce8c-2ca0-46e6-ab85-8a477ba93052` (line 7848) appends
+`assistant[thinking,text,tool_use,tool_use] → user[tool_result,tool_result]`.
+Zero capture is not zero calls: calls refused before hooks are still forwarded
+to the client. They fail the ordinary capture guard, and the narrowly scoped
+canonical name-dispatch exception requires exactly **one** declared call.
+Their multi-call eviction is therefore expected and deliberately unchanged.
+The final zero-capture case `6eca7fa0-d809-455f-ab33-ef50a6c5fdba` has no
+follow-up in this extract: the journal proves its capture-less checkpoint and
+max-turn recovery/eviction, but not its exact call count or CLI refusal type.
+The event does not log individual guard vetoes, so a more specific cause for
+that final case cannot be established from the supplied evidence alone.
+
+These correlations use complete **shape** prefixes, not unavailable body
+content or tool IDs; no transcript or live cache was read. The journal does
+not identify every refusal as name-dispatch vs input validation. The durable
+local analysis artifact is `journal-classification.json` in the evidence
+root. This patch does not broaden either uncaptured or mixed continuation.
+
+### Residual limits for the parent
+
+- No live model/client test, CI, PR, merge or install was attempted (expressly
+  prohibited). Offline real-CLI request bodies prove delivery and content
+  prefix stability, not provider cache billing or future model obedience.
+- Real CLI version scope is 2.1.322 / SDK 0.2.141. Grouped-first-fragment or
+  missing-first-UUID shapes still replay rather than risk orphan results.
+- SQLite's older reader rejects unknown mapping-history fields. Before a
+  downgrade to bc7570dd against a SQLite store that contains hybrid markers,
+  use a compatible export/migration procedure or retain a reader supporting
+  the marker; do not silently run the old reader on new history. No live
+  store was changed here. JSON legacy multi-call mappings already replay on
+  read; rollback/export qualification itself is not claimed.
+
 ## Unstreamed SSE publication blocker (2026-11-14)
 
 **Status: fixed and locally verified on `fix/mixed-rejection-resume`; no push,

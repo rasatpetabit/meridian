@@ -62,6 +62,8 @@ export interface EarlyStopTracker {
   /** Last assistant message containing a forwarded tool_use.
    *  The SDK's resumeSessionAt option only accepts assistant UUIDs. */
   toolCallAssistantUuid?: string
+  firstToolCallAssistantUuid?: string
+  firstToolCallId?: string
   /** true once shouldEarlyStop has returned true — it fires at most once */
   fired: boolean
 }
@@ -142,6 +144,12 @@ export function noteAssistantMessage(
   // foreign `mcp__*` names, which is what makes a missed prefix silent rather
   // than noisy.
   noteAssistantContent(tracker, content, clientToolPrefix, clientOwnsToolSearch)
+  if (before === 0 && tracker.expected.size === 1 && Array.isArray(content) &&
+    content.filter(block => block?.type === "tool_use").length === 1 &&
+    typeof m.uuid === "string" && m.uuid.length > 0) {
+    tracker.firstToolCallAssistantUuid = m.uuid
+    tracker.firstToolCallId = [...tracker.expected][0]
+  }
   if (tracker.expected.size > before) {
     // A newer tool-bearing assistant message supersedes the older checkpoint.
     // Fail closed when its UUID is absent: the older message may not contain
@@ -198,9 +206,11 @@ export function checkpointHasUncapturedCalls(
 export function checkpointRequiresReplay(
   toolCallIds: Iterable<string> | undefined,
   forwardedToolUseIds: ReadonlySet<string>,
+  nativeToolCallId?: string,
 ): boolean {
   const ids = new Set(toolCallIds)
-  return ids.size > 1 || checkpointHasUncapturedCalls(ids, forwardedToolUseIds)
+  return (ids.size > 1 && (!nativeToolCallId || !ids.has(nativeToolCallId))) ||
+    checkpointHasUncapturedCalls(ids, forwardedToolUseIds)
 }
 
 export function checkpointPublicationRequiresReplay({
@@ -209,12 +219,14 @@ export function checkpointPublicationRequiresReplay({
   observedToolCallIds,
   forwardedToolUseIds,
   checkpointReady,
+  nativeToolCallId,
 }: {
   clientToolCallIds: Iterable<string>
   checkpointToolCallIds: Iterable<string> | undefined
   observedToolCallIds: Iterable<string>
   forwardedToolUseIds: ReadonlySet<string>
   checkpointReady: boolean
+  nativeToolCallId?: string
 }): boolean {
   const visible = new Set(clientToolCallIds)
   const observed = new Set(observedToolCallIds)
@@ -223,7 +235,7 @@ export function checkpointPublicationRequiresReplay({
   return !checkpointReady ||
     visible.size !== checkpoint.size ||
     [...visible].some(id => !checkpoint.has(id)) ||
-    checkpointRequiresReplay(visible, forwardedToolUseIds) ||
+    checkpointRequiresReplay(visible, forwardedToolUseIds, nativeToolCallId) ||
     checkpointHasUncapturedCalls(observed, forwardedToolUseIds)
 }
 

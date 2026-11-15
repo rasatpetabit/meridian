@@ -148,7 +148,7 @@ import { extractLettaConversationId, LETTA_CONVERSATION_HEADER } from "./adapter
 import { isClaudeCodeClient } from "./adapters/claudecode"
 import { openAiAdapter, deriveToolLoopSessionId, SYNTHESIZED_SESSION_HEADER } from "./adapters/openai"
 import { translateResponsesToAnthropic, translateAnthropicToResponses, createResponsesSseTranslator, reasoningRequested, buildResponsesToolAliases, resolveCodexThreadIdentity, type ResponsesRequest, type AnthropicSseEvent as ResponsesAnthropicSseEvent } from "./openaiResponses"
-import { flattenAssistantContent, normalizeStructuredUserContent, replayToolResultHeader, frameStructuredReplay, coalesceStructuredUserMessages, coalesceTrailingSystemReminders, layoutReplayBlocks, type ReplayPart } from "./replay"
+import { hybridToolResultContinuation, flattenAssistantContent, normalizeStructuredUserContent, replayToolResultHeader, frameStructuredReplay, coalesceStructuredUserMessages, coalesceTrailingSystemReminders, layoutReplayBlocks, type ReplayPart } from "./replay"
 import { unstreamedAssistantBlockFrames } from "./unstreamedAssistant"
 import { extractAdvisorModel, extractSystemText, getLastUserMessage, stripAdvisorTools, stripNonStandardStreamFields, MULTIMODAL_TYPES, buildToolUseIndex, frameReplayTurns } from "./messages"
 import { requireAuth, authEnabled } from "./auth"
@@ -3928,7 +3928,10 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
         messagesToConvert = executionMessages
       }
 
-      if (passthroughToolCallAssistantUuid && (passthroughToolCallIds?.length ?? 0) > 1) {
+      const hybridNativeId = cachedSession?.passthroughNativeToolCallId
+      let hybridResultContent: unknown[] | undefined
+      const hybridEcho = allMessages.slice(cachedSession?.messageCount ?? 0)
+      if (passthroughToolCallAssistantUuid && (passthroughToolCallIds?.length ?? 0) > 1 && !hybridNativeId) {
         claudeLog("passthrough.checkpoint_replay", {
           expectedToolIds: passthroughToolCallIds?.length,
           reason: "multi_call_results_unproved",
@@ -3956,9 +3959,14 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
           passthroughToolCallIds ?? [],
           trailingSystemReminderOptions,
         )
-        if (checkpointContinuation) {
-          messagesToConvert = checkpointContinuation
-        } else if (carriesSynthesizedSessionKey || settledThenContinued) {
+        const hybridContent = checkpointContinuation && hybridNativeId
+          ? hybridToolResultContinuation(checkpointContinuation[0]!.content, hybridEcho,
+            passthroughToolCallIds ?? [], hybridNativeId)
+          : undefined
+        if (checkpointContinuation && (!hybridNativeId || hybridContent)) {
+          hybridResultContent = hybridNativeId ? checkpointContinuation[0]!.content : undefined
+          messagesToConvert = hybridContent ? [{ role: "user", content: hybridContent }] : checkpointContinuation
+        } else if (!hybridNativeId && (carriesSynthesizedSessionKey || settledThenContinued)) {
           // The checkpoint is Meridian's own inference, not a client contract.
           // A synthesized key means the client sent no session header and never
           // agreed to echo the exact tool-call ids Meridian forwarded, so an
@@ -4210,6 +4218,13 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
           passthroughMcpName,
         )
         : undefined
+
+      if (hybridResultContent && hybridNativeId) {
+        const content = hybridToolResultContinuation(hybridResultContent, hybridEcho,
+          passthroughToolCallIds ?? [], hybridNativeId, renderReplayToolName)
+        if (!content) throw new Error("Validated hybrid checkpoint lost its complete results")
+        messagesToConvert = [{ role: "user", content }]
+      }
 
       // Build the prompt — either structured or text.
       // Structured prompts are stored as arrays so they can be replayed on retry.
@@ -6097,6 +6112,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
             let structuredOutput: unknown
             let nextPassthroughToolCallAssistantUuid: string | undefined
             let nextPassthroughToolCallIds: string[] | undefined
+            let nextPassthroughNativeToolCallId: string | undefined
             let sawCanonicalResult = false
             let assistantRefusal: AssistantRefusal | null = null
             // The CLI sometimes refuses a client call before the PreToolUse
@@ -6272,6 +6288,13 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               // recognizes a duplicate. The client will return each ID.
               nextPassthroughToolCallIds = [...earlyStop.expected].filter(id =>
                 !droppedToolUseIds.has(id) || streamedToolUseIds.has(id))
+              if (nextPassthroughToolCallIds.length > 1 && streamEventsSeen > 0 &&
+                earlyStop.firstToolCallAssistantUuid && earlyStop.firstToolCallId &&
+                trackerCoversStreamedCalls(earlyStop, streamedToolUseIds) &&
+                nextPassthroughToolCallIds.every(id => forwardedToolUseIds.has(id))) {
+                nextPassthroughToolCallAssistantUuid = earlyStop.firstToolCallAssistantUuid
+                nextPassthroughNativeToolCallId = earlyStop.firstToolCallId
+              }
               earlyStopFired = true
               for (let i = capturedToolUses.length - 1; i >= 0; i--) {
                 if (!earlyStop.expected.has(capturedToolUses[i]!.id)) capturedToolUses.splice(i, 1)
@@ -6446,11 +6469,14 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 earlyStop.expected.clear()
                 earlyStop.resolved.clear()
                 earlyStop.toolCallAssistantUuid = undefined
+                earlyStop.firstToolCallAssistantUuid = undefined
+                earlyStop.firstToolCallId = undefined
                 earlyStop.fired = false
                 earlyStopFired = false
                 unstreamedAssistants.length = 0
                 nextPassthroughToolCallAssistantUuid = undefined
                 nextPassthroughToolCallIds = undefined
+                nextPassthroughNativeToolCallId = undefined
                 sawCanonicalResult = false
                 const token: StreamAttemptToken = Object.freeze({ mode })
                 activeStreamAttempt = token
@@ -7360,6 +7386,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                   (passthrough && checkpointPublicationRequiresReplay({
                     clientToolCallIds,
                     checkpointToolCallIds: nextPassthroughToolCallIds,
+                    nativeToolCallId: nextPassthroughNativeToolCallId,
                     observedToolCallIds: [...observedToolUseIds, ...streamedToolUseIds],
                     forwardedToolUseIds,
                     checkpointReady: earlyStopFired && sawCanonicalResult && Boolean(nextPassthroughToolCallAssistantUuid),
@@ -7400,9 +7427,10 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                         currentSessionId!,
                         profileScopedCwd,
                         reconcileReturnedSessionUuids(
-                          sdkUuidMap,
+                          nextPassthroughNativeToolCallId
+                            ? withClientAssistantUuid(sdkUuidMap, allMessages.length, null) : sdkUuidMap,
                           allMessages.length,
-                          currentClientAssistantUuid,
+                          nextPassthroughNativeToolCallId ? null : currentClientAssistantUuid,
                           resumeSessionId,
                           currentSessionId,
                         ),
@@ -7416,6 +7444,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                         !executionHistory.changed,
                         resumeContextHash,
                         assertDurableWritesAllowed,
+                        nextPassthroughNativeToolCallId,
                       ), stored => {
                         // JSON cancellation shares this request queue; SQL flags wait for COMMIT below.
                         if (stored && !bookkeepingHandle) {
@@ -8366,15 +8395,15 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               // declared calls, and no dropped calls before retaining its
               // settled assistant checkpoint (see proxy-core SPEC).
               //
-              // Keeping a captured single-call checkpoint lets the next request rewind
+              // Keeping a captured checkpoint lets the next request rewind
               // to the tool-use boundary and append the client's real
               // tool_result, instead of replaying the conversation against a
               // cold cache. Other drain failures remain unsafe and are
               // evicted.
               //
-              // Exactly one streamed call. Multi-call checkpoints, captured or
-              // rejected, cannot prove delivery of all real results and are evicted
-              // and the next request is a full replay.
+              // The uncaptured name-dispatch exception is still single-call.
+              // Captured streamed batches may carry the first-fragment hybrid
+              // proof through the shared publication guard.
               const canonicalRejectedCheckpoint =
                 uncapturedRecoveryActive &&
                 confirmedToolUnavailable &&
@@ -8391,6 +8420,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 !checkpointPublicationRequiresReplay({
                   clientToolCallIds: [...streamedToolUseIds, ...capturedToolUses.map(tool => tool.id)],
                   checkpointToolCallIds: nextPassthroughToolCallIds,
+                  nativeToolCallId: nextPassthroughNativeToolCallId,
                   observedToolCallIds: [...observedToolUseIds, ...streamedToolUseIds],
                   forwardedToolUseIds: canonicalRejectedCheckpoint
                     ? new Set([...forwardedToolUseIds, ...streamedToolUseIds])
@@ -8509,9 +8539,10 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                         currentSessionId!,
                         profileScopedCwd,
                         reconcileReturnedSessionUuids(
-                          sdkUuidMap,
+                          nextPassthroughNativeToolCallId
+                            ? withClientAssistantUuid(sdkUuidMap, allMessages.length, null) : sdkUuidMap,
                           allMessages.length,
-                          currentClientAssistantUuid,
+                          nextPassthroughNativeToolCallId ? null : currentClientAssistantUuid,
                           resumeSessionId,
                           currentSessionId,
                         ),
@@ -8525,6 +8556,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                         !executionHistory.changed,
                         resumeContextHash,
                         assertDurableWritesAllowed,
+                        nextPassthroughNativeToolCallId,
                       ), stored => {
                         // JSON cancellation shares this request queue; SQL flags wait for COMMIT below.
                         if (stored && !bookkeepingHandle) {

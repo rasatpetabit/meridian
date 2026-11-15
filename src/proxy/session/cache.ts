@@ -272,6 +272,7 @@ function stateFromSharedSession(
     sdkMessageUuids: shared.sdkMessageUuids,
     passthroughToolCallAssistantUuid: shared.passthroughToolCallAssistantUuid,
     passthroughToolCallIds: shared.passthroughToolCallIds,
+    passthroughNativeToolCallId: shared.passthroughNativeToolCallId,
     contextUsage: shared.contextUsage,
     currentTranscript: shared.currentTranscript,
     previousTranscript: shared.previousTranscript,
@@ -643,6 +644,7 @@ export function storeSession(
   sdkPrefixMatchesClient = true,
   resumeContextHash?: string,
   beforePublish?: () => void,
+  passthroughNativeToolCallId?: string,
 ): StoredSessionGeneration | false | Promise<StoredSessionGeneration | false> {
   if (!claudeSessionId) return false
   const epoch = cacheEpoch
@@ -671,6 +673,7 @@ export function storeSession(
     sdkMessageUuids: publishedUuids,
     ...(sdkPrefixMatchesClient && passthroughToolCallAssistantUuid ? { passthroughToolCallAssistantUuid } : {}),
     ...(sdkPrefixMatchesClient && passthroughToolCallIds ? { passthroughToolCallIds } : {}),
+    ...(sdkPrefixMatchesClient && passthroughNativeToolCallId ? { passthroughNativeToolCallId } : {}),
     ...(contextUsage ? { contextUsage } : {}),
     ...(currentTranscript ? { currentTranscript } : {}),
     ...(sourceTranscript ? { previousTranscript: sourceTranscript } : {}),
@@ -700,6 +703,7 @@ export function storeSession(
       messageBlockHashes,
       passthroughToolCallAssistantUuid: sdkPrefixMatchesClient ? passthroughToolCallAssistantUuid ?? null : null,
       passthroughToolCallIds: sdkPrefixMatchesClient ? passthroughToolCallIds ?? null : null,
+      passthroughNativeToolCallId: sdkPrefixMatchesClient ? passthroughNativeToolCallId ?? null : null,
       currentTranscript,
       sourceTranscript,
       expectedMappingGeneration: expectedGeneration,
@@ -745,6 +749,7 @@ export function storeSession(
       clientLineageHash ?? null,
       resumeContextHash ?? null,
       beforePublish,
+      sdkPrefixMatchesClient ? passthroughNativeToolCallId ?? null : null,
     )
   }
   return mapStoreMutation(storedGeneration, generation => {

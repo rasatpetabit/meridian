@@ -11,7 +11,7 @@ const repoRoot = dirname(scriptDir)
 const harness = join(scriptDir, "e2e-offline-fresh-checkpoint.mjs")
 const ROW_TIMEOUT_MS = 300_000
 
-/** Harness flags from the 46-row real-CLI offline matrix, in capture order. */
+/** Harness flags for every real-CLI offline matrix row, in capture order. */
 export const ROWS = [
   { label: "shapes-error-first-2", args: ["--captured", "--calls=2", "--result-kind=error-first"] },
   { label: "shapes-error-first-2-follow", args: ["--captured", "--calls=2", "--result-kind=error-first", "--follow-on"] },
@@ -59,6 +59,17 @@ export const ROWS = [
   { label: "shapes-original-22", args: ["--captured", "--calls=2", "--deferred"] },
   { label: "shapes-original-23", args: ["--captured", "--calls=3", "--thinking", "--follow-on"] },
   { label: "shapes-original-24", args: ["--captured", "--calls=2", "--follow-on"] },
+  // Mixed batches whose uncaptured calls are name-dispatch refusals resume with hybrid results.
+  { label: "mixed-bare-2-1-follow", args: ["--mixed", "--calls=2", "--bare-call=1", "--follow-on"] },
+  { label: "mixed-bare-2-2-follow", args: ["--mixed", "--calls=2", "--bare-call=2", "--follow-on"] },
+  { label: "mixed-bare-3-1-follow", args: ["--mixed", "--calls=3", "--bare-call=1", "--follow-on"] },
+  { label: "mixed-bare-3-2-follow-thinking", args: ["--mixed", "--calls=3", "--bare-call=2", "--follow-on", "--thinking"] },
+  { label: "mixed-bare-3-3-follow", args: ["--mixed", "--calls=3", "--bare-call=3", "--follow-on"] },
+  { label: "mixed-two-bare-later-3-follow", args: ["--mixed", "--calls=3", "--follow-on"] },
+  { label: "mixed-two-bare-first-3-follow", args: ["--mixed", "--calls=3", "--captured-last", "--follow-on"] },
+  // Mixed controls that must keep fresh replay.
+  { label: "mixed-deferred-control", args: ["--mixed", "--calls=2", "--deferred"] },
+  { label: "mixed-non-stream-control", args: ["--mixed", "--calls=2", "--captured-last", "--non-stream"] },
 ]
 
 const HELP = `Usage: bun scripts/e2e-wire-matrix.mjs --claude=<CLI path>
@@ -78,7 +89,7 @@ function fail(message) {
 function assertRowList() {
   const forbidden = /^(?:--claude|--source-root|--wire)(?:=|$)/
   const labels = new Set()
-  if (ROWS.length !== 46) fail(`wire matrix has ${ROWS.length} rows, expected 46`)
+  if (ROWS.length !== 55) fail(`wire matrix has ${ROWS.length} rows, expected 55`)
   for (const row of ROWS) {
     if (labels.has(row.label)) fail(`duplicate wire-matrix row ${row.label}`)
     labels.add(row.label)

@@ -45,4 +45,4 @@ Upstream prompt caching hits only when each request begins with the previous req
 
 - Before install: `bun scripts/e2e-wire-matrix.mjs --claude=<production CLI>` passes every row, and each continuation shape the change adds gets its own row. Keep every R1 prefix assertion; an unproved shape fails closed to fresh replay. Name the rollback artifact (`npm pack` of the installed package) before installing.
 - After install: one turn with two parallel tool calls is followed by a request logging `lineage=continuation` with a small `cache_write`. After real traffic, compare `bun scripts/cache-journal-gate.mjs --since <restart>` with the same report for an equal window before install. More new-lineage requests after multi-tool-result turns, or more writes of 100k tokens or more, is a regression: roll back, then diagnose.
-- Suites touching bookkeeping need `TMPDIR` on a local or tmpfs filesystem; the store's filesystem guard rejects virtiofs.
+- Suites touching bookkeeping, and the wire matrix (its harness sets `TMPDIR` to `MERIDIAN_E2E_SCRATCH`), need that directory on a local or tmpfs filesystem; the store's filesystem guard rejects virtiofs.

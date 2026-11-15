@@ -32,6 +32,7 @@ import { serve, createAdaptorServer } from "@hono/node-server"
 import { getConnInfo } from "@hono/node-server/conninfo"
 import { socketActivationFd, parseIdleExitSeconds, isModelRequestPath } from "./socketActivation"
 import type { Server } from "node:http"
+import { isDeepStrictEqual } from "node:util"
 import { join } from "node:path"
 import { configPath } from "../configDir"
 import { query } from "@anthropic-ai/claude-agent-sdk"
@@ -4920,6 +4921,8 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
           const rejectedToolNames = new Map<string, string>()
           const toolBlockRecords = new Map<string, StreamedToolBlockRecord>()
           const activeToolBlocks = new Map<number, StreamedToolBlockRecord>()
+          let wireToolBlockStarts = 0
+          let contentFromEarlierAttempt = false
           let lastAttemptMaxTurns: number | undefined
           let nextPassthroughToolCallAssistantUuid: string | undefined
           let nextPassthroughToolCallIds: string[] | undefined
@@ -4944,6 +4947,20 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               && !managedForkPublished
             ) return true
             return invalidateNonStreamMapping()
+          }
+
+          const runNonStreamSdkAttempt = async function* (
+            attemptQuery: ReturnType<typeof buildQueryOptions>,
+            mode: string,
+          ) {
+            contentFromEarlierAttempt ||= contentBlocks.length > 0
+            toolBlockRecords.clear()
+            rejectedToolNames.clear()
+            activeToolBlocks.clear()
+            streamedToolUseIds.clear()
+            wireToolBlockStarts = 0
+            lastAttemptMaxTurns = attemptQuery.options.maxTurns
+            yield* runSdkQueryAttempt(attemptQuery, requestAbort.controller.signal, requestMeta, mode, managedSdkAttemptLocators())
           }
 
           try {
@@ -5023,8 +5040,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                     advisorModel,
                   }, requestAbort.controller)
                   attemptMaxTurns = attemptQuery.options.maxTurns
-                  lastAttemptMaxTurns = attemptMaxTurns
-                  for await (const event of runSdkQueryAttempt(attemptQuery, requestAbort.controller.signal, requestMeta, "non_stream", managedSdkAttemptLocators())) {
+                  for await (const event of runNonStreamSdkAttempt(attemptQuery, "non_stream")) {
                     // Capture Claude Max subscription quota updates emitted by
                     // the SDK as rate_limit_event. We snapshot them in this
                     // profile's slot of the (per-profile-scoped) rate limit
@@ -5114,7 +5130,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                     currentSessionId = managedForkTarget?.sessionId
                     sdkUuidMap.length = 0
                     for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
-                    yield* runSdkQueryAttempt(buildQueryOptions({
+                    yield* runNonStreamSdkAttempt(buildQueryOptions({
                       prompt: buildFreshPrompt(executionMessages, sanitizeOpts, renderReplayToolName, modelReplayBudget(), "non_stream_resume_replay"),
                       model, workingDirectory, clientWorkingDirectory: promptClientWorkingDirectory, clientEnvironmentMayDifferFromProxy, systemContext, claudeExecutable,
                       passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools, earlyStop: earlyStopEnabled, isForwardedToolUse,
@@ -5130,7 +5146,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
                       advisorModel,
-                    }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators())
+                    }, requestAbort.controller), "non_stream_fresh")
                     return
                   }
 
@@ -5175,7 +5191,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                     currentSessionId = managedForkTarget?.sessionId
                     sdkUuidMap.length = 0
                     for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
-                    yield* runSdkQueryAttempt(buildQueryOptions({
+                    yield* runNonStreamSdkAttempt(buildQueryOptions({
                       prompt: buildFreshPrompt(executionMessages, sanitizeOpts, renderReplayToolName, modelReplayBudget(), "non_stream_model_fallback"),
                       model, workingDirectory, clientWorkingDirectory: promptClientWorkingDirectory, clientEnvironmentMayDifferFromProxy, systemContext, claudeExecutable,
                       passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools, earlyStop: earlyStopEnabled, isForwardedToolUse,
@@ -5191,7 +5207,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
                       advisorModel,
-                    }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators())
+                    }, requestAbort.controller), "non_stream_fresh")
                     return
                   }
 
@@ -5389,9 +5405,11 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                       forwardedStart: true,
                       naturalStop: false,
                     }
+                    wireToolBlockStarts++
                     activeToolBlocks.set(event.index, record)
                     toolBlockRecords.set(block.id, record)
-                  } else if (eventType === "content_block_delta" && event.delta.type === "input_json_delta") {
+                  } else if (eventType === "content_block_delta" && event.delta?.type === "input_json_delta" &&
+                    typeof event.delta.partial_json === "string") {
                     const record = activeToolBlocks.get(event.index)
                     if (record) record.json += event.delta.partial_json
                   } else if (eventType === "content_block_stop") {
@@ -5609,19 +5627,32 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               abortIsOurs: true,
             })
             const visibleCalls = contentBlocks.filter(block => block.type === "tool_use")
-            const confirmedToolUnavailable = process.env.MERIDIAN_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY !== "0" &&
-              visibleCalls.length > 0 && visibleCalls.every(block => {
+            const confirmedToolUnavailable = env("PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY") !== "0" &&
+              !contentFromEarlierAttempt && wireToolBlockStarts > 0 &&
+              wireToolBlockStarts === toolBlockRecords.size &&
+              toolBlockRecords.size === streamedToolUseIds.size &&
+              toolBlockRecords.size === rejectedToolNames.size &&
+              toolBlockRecords.size === visibleCalls.length &&
+              new Set(visibleCalls.map(block => block.id)).size === visibleCalls.length &&
+              [...toolBlockRecords.values()].every(record =>
+                streamedToolUseIds.has(record.id) && rejectedToolNames.get(record.id) === record.name &&
+                streamedToolBlockVeto(record) === undefined) &&
+              visibleCalls.every(block => {
                 if (typeof block.id !== "string" || typeof block.name !== "string" ||
                   block.input === null || typeof block.input !== "object" || Array.isArray(block.input)) return false
                 const record = toolBlockRecords.get(block.id)
-                return record !== undefined && record.name === block.name &&
-                  rejectedToolNames.get(block.id) === block.name && streamedToolBlockVeto(record) === undefined
+                if (!record || record.name !== block.name) return false
+                try {
+                  return isDeepStrictEqual(block.input, JSON.parse(record.json))
+                } catch {
+                  return false
+                }
               })
             const canRecoverRejectedToolUses = confirmedToolUnavailable && lastAttemptMaxTurns === 1 &&
               !requestAbort.abortSnapshot().aborted && !durableWritesRevoked &&
               uncapturedRecoveryVeto({
                 reason: sdkTerm.reason, passthrough, capturedToolUses: capturedToolUses.length,
-                streamedToolUses: visibleCalls.length, droppedToolUseIds: droppedToolUseIds.size,
+                streamedToolUses: wireToolBlockStarts, droppedToolUseIds: droppedToolUseIds.size,
                 sawDuplicateToolUse, forceSingleToolUse, earlyStopFired,
                 uncapturedRecoveryEnabled: false, confirmedToolUnavailable, attemptedMaxTurns: lastAttemptMaxTurns,
               }) === undefined

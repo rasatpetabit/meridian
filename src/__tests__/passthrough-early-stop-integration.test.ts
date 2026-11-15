@@ -5025,6 +5025,147 @@ describe("Integration: passthrough early stop", () => {
     })
   }
 
+  describe("JSON capped proof round2", () => {
+    const cappedError = () => new Error("Claude Code returned an error result: Reached maximum number of turns (1)")
+    const call: { type: "tool_use"; id: string; name: string; input: Record<string, unknown> } = {
+      type: "tool_use", id: "round2-call", name: "read", input: { file_path: "/round2" },
+    }
+    const wire = (id = call.id, input: unknown = call.input) => [
+      toolUseBlockStart(0, call.name, id), inputJsonDelta(0, JSON.stringify(input)), blockStop(0),
+    ]
+    const metadata = (calls = [call]) => ({ ...assistantMessage(calls), test_skip_pre_tool_hook: true })
+    const complete = () => [messageStart("msg_round2"), ...wire(), messageDelta("tool_use"), messageStop(),
+      metadata(), unavailableToolMessage(call.id, call.name)]
+    const request = () => post(app, { model: "claude-sonnet-4-5", max_tokens: 400, stream: false,
+      tools: [READ_TOOL], messages: [{ role: "user", content: "prove every call" }] })
+
+    for (const shape of ["started-unsurfaced", "incomplete-unsurfaced", "duplicate-id", "visible-without-wire",
+      "extra-rejection", "input-mismatch"] as const) {
+      it("fails closed for " + shape, async () => {
+        const extra = { ...call, id: "round2-extra" }
+        mockMessages = [messageStart("msg_round2"), ...wire(),
+          ...(shape === "started-unsurfaced" ? [...wire(extra.id), unavailableToolMessage(extra.id, extra.name)] : []),
+          ...(shape === "incomplete-unsurfaced" ? [toolUseBlockStart(1, call.name, extra.id)] : []),
+          ...(shape === "duplicate-id" ? wire() : []),
+          messageDelta("tool_use"), messageStop(),
+          metadata(shape === "visible-without-wire" ? [call, extra]
+            : shape === "input-mismatch" ? [{ ...call, input: { file_path: "/not-on-wire" } }] : [call]),
+          unavailableToolMessage(call.id, call.name),
+          ...(["visible-without-wire", "extra-rejection"].includes(shape) ? [unavailableToolMessage(extra.id, extra.name)] : []),
+        ]
+        mockTerminalError = cappedError()
+        const response = await request()
+        const body = await response.json()
+        expect(response.status).toBe(500)
+        expect(body.type).toBe("error")
+        expect(body.content).toBeUndefined()
+      })
+    }
+
+    for (const shape of ["stale-wire", "stale-rejection", "stale-active-block", "stale-content", "fresh-proof"] as const) {
+      it("isolates retry attempt " + shape, async () => {
+        const stale = assistantMessage([{ type: "text", text: "STALE_ERROR_CONTENT" }])
+        const final = complete()
+        mockAttemptScripts = [{
+          messages: shape === "stale-content" ? [{ ...stale, error: "rate_limit", test_skip_pre_tool_hook: true }]
+            : shape === "stale-rejection" ? [unavailableToolMessage(call.id, call.name)]
+            : shape === "stale-active-block" ? [toolUseBlockStart(0, call.name, call.id)]
+            : shape === "fresh-proof" ? [...wire("abandoned-id"), unavailableToolMessage("abandoned-id", call.name)]
+            : [...wire(), unavailableToolMessage(call.id, call.name)],
+          terminalError: new Error("API Error: 429 rate limit exceeded"),
+        }, {
+          messages: shape === "stale-wire" ? [metadata(), unavailableToolMessage(call.id, call.name)]
+            : shape === "stale-rejection" ? final.filter(message => message.type !== "user")
+            : shape === "stale-active-block" ? [inputJsonDelta(0, JSON.stringify(call.input)), blockStop(0),
+              metadata(), unavailableToolMessage(call.id, call.name)] : final,
+          terminalError: cappedError(),
+        }]
+        const savedDelay = process.env.MERIDIAN_RATE_LIMIT_BASE_DELAY_MS
+        process.env.MERIDIAN_RATE_LIMIT_BASE_DELAY_MS = "1"
+        try {
+          const response = await request()
+          const body = await response.json()
+          expect(capturedQueryParamsAll).toHaveLength(2)
+          expect(response.status).toBe(shape === "fresh-proof" ? 200 : 500)
+          if (shape === "fresh-proof") {
+            expect(body.content).toEqual([call])
+            expect(body.stop_reason).toBe("tool_use")
+          } else {
+            expect(body.type).toBe("error")
+            expect(body.content).toBeUndefined()
+          }
+        } finally {
+          if (savedDelay === undefined) delete process.env.MERIDIAN_RATE_LIMIT_BASE_DELAY_MS
+          else process.env.MERIDIAN_RATE_LIMIT_BASE_DELAY_MS = savedDelay
+        }
+      })
+    }
+
+    for (const fallback of ["resume-replay", "model-fallback"] as const) {
+      it("recovers " + fallback + " at maxTurns 1 after a lifted-cap attempt", async () => {
+        const messages = [{ role: "user", content: "first turn" }]
+        mockMessages = [assistantMessage([{ type: "text", text: "first answer" }])]
+        const first = await post(app, { model: "claude-sonnet-4-5", max_tokens: 400, stream: false,
+          tools: [READ_TOOL], messages })
+        expect(first.status).toBe(200)
+        await first.text()
+        mockAttemptScripts = [
+          { messages: [], terminalError: cappedError() },
+          { messages: [], terminalError: new Error(fallback === "resume-replay"
+            ? "No message found with message.uuid stale-anchor" : "You're out of extra usage") },
+          { messages: complete(), terminalError: cappedError() },
+        ]
+        const response = await post(app, { model: "claude-sonnet-4-5", max_tokens: 400, stream: false,
+          tools: [READ_TOOL], messages: [...messages, { role: "assistant", content: "first answer" },
+            { role: "user", content: "prove every call" }] })
+        const body = await response.json()
+        expect(capturedQueryParamsAll.map(params => params.options.maxTurns)).toEqual([1, 1, 3, 1])
+        expect(response.status).toBe(200)
+        expect(body.content).toEqual([call])
+        expect(body.stop_reason).toBe("tool_use")
+      })
+    }
+
+    it("honours the legacy-prefixed recovery kill switch", async () => {
+      const savedLegacy = process.env.CLAUDE_PROXY_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY
+      delete process.env.MERIDIAN_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY
+      process.env.CLAUDE_PROXY_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY = "0"
+      try {
+        mockMessages = complete()
+        mockTerminalError = cappedError()
+        const response = await request()
+        expect(response.status).toBe(500)
+        expect((await response.json()).type).toBe("error")
+      } finally {
+        if (savedLegacy === undefined) delete process.env.CLAUDE_PROXY_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY
+        else process.env.CLAUDE_PROXY_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY = savedLegacy
+      }
+    })
+
+    for (const delta of [undefined, { type: "input_json_delta" }, { type: "input_json_delta", partial_json: 42 }]) {
+      it("ignores malformed delta " + JSON.stringify(delta), async () => {
+        mockMessages = [messageStart("msg_round2"), toolUseBlockStart(0, call.name, call.id),
+          inputJsonDelta(0, JSON.stringify(call.input)), streamEvent({ type: "content_block_delta", index: 0, delta }),
+          blockStop(0), messageDelta("tool_use"), messageStop(), metadata(), unavailableToolMessage(call.id, call.name)]
+        mockTerminalError = cappedError()
+        const response = await request()
+        expect(response.status).toBe(200)
+        expect((await response.json()).content).toEqual([call])
+      })
+    }
+
+    it("compares nested input structurally rather than by property order", async () => {
+      const input = { file_path: "/round2", nested: { a: [1, { b: true }], c: null } }
+      mockMessages = [messageStart("msg_round2"), ...wire(call.id, input), messageDelta("tool_use"), messageStop(),
+        metadata([{ ...call, input: { nested: { c: null, a: [1, { b: true }] }, file_path: "/round2" } }]),
+        unavailableToolMessage(call.id, call.name)]
+      mockTerminalError = cappedError()
+      const response = await request()
+      expect(response.status).toBe(200)
+      expect((await response.json()).content).toEqual([{ ...call, input }])
+    })
+  })
+
   // Uncaptured calls must fail closed regardless of the CLI refusal wording.
   for (const shape of [
     { stream: true, deferred: false, mixed: true, inputRejected: true, single: false },

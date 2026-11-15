@@ -152,13 +152,22 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   the visible stop reason or assistant UUID. Multi-call mappings still evict
   and the next request replays every real client result; this changes neither
   SSE behavior nor checkpoint eligibility.
-  At the proxy's one-turn cap, JSON also recovers `error_max_turns` when every
-  visible call has an exact ID/resolved-name-matched CLI `No such tool available`
-  rejection and a naturally closed, complete object input on the wire, with
-  object inputs in the visible assistant metadata. Reuse the SSE uncaptured
-  recovery veto and input-completeness checks; partial proof, mismatched
-  names/IDs, incomplete blocks, cancellation, revoked writes, duplicate or
-  forced-single calls, and the recovery kill switch keep failing closed.
+  At the proxy's one-turn cap, JSON also recovers `error_max_turns` only when
+  the final attempt's client tool-block starts, visible tool_use IDs and exact
+  CLI `No such tool available` rejection IDs are identical, with matching
+  resolved names. Every wire record must be naturally closed and complete;
+  duplicate starts/IDs, unsurfaced wire blocks, visible calls without records
+  and extra rejections fail closed. Each visible object input must deep-equal
+  strict `JSON.parse(record.json)`; unparseable or divergent metadata cannot
+  authorize a call SSE did not prove. Reuse the SSE uncaptured recovery veto
+  with the wire-start count and its input-completeness check. Reset wire and
+  rejection proof at every SDK attempt, including fresh resume/model fallback,
+  and read the actual constructed attempt's budget. The pre-existing JSON
+  assembly loop can retain error-assistant content across a retry: if any
+  content survives into a later attempt, veto this new recovery, without
+  changing the retry/assembly loop. Cancellation, revoked writes, duplicate or
+  forced-single calls, and the recovery kill switch (including its legacy
+  `CLAUDE_PROXY_` alias) keep failing closed.
   This does not enable opt-in abort-window recovery or larger-budget JSON
   error recovery. As in SSE, a fully rejected undeclared name is delivered as
   written for the client's invalid-tool result: rejection proves it ran nowhere;

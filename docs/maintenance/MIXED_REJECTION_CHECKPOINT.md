@@ -1,5 +1,91 @@
 # Mixed and multi-turn rejected checkpoint evidence
 
+## Capped JSON review follow-up: exact final-attempt proof (2026-11-15)
+
+Follow-up to `9434c189` on `fix/json-capped-refused-500`, confined to the same
+worktree. This section tightens the earlier capped JSON proof below; it does
+not broaden SSE, checkpoint retention, abort-window recovery or larger-budget
+recovery. The operator accepted both blockers and both advisories from the
+cross-vendor review. No new product or architecture choice is introduced.
+
+- **Every wire block:** count every client tool-block start, not just unique
+  IDs or assembled metadata. Require equal wire/visible/rejected ID sets, no
+  duplicate starts or visible IDs, matching resolved names and complete records
+  for every started block. Pass the wire-start count to `uncapturedRecoveryVeto`.
+  A hidden response's client block still vetoes capped recovery if it did not
+  surface in the delivered batch; the existing response-identity filter is
+  unchanged and cannot supply completeness proof by itself.
+- **Attempt isolation and input equality:** one non-stream attempt wrapper
+  clears the wire records, active-index map, streamed-ID set, rejection map and
+  start count for each primary/retry/fresh fallback attempt. Each delivered
+  object input must structurally equal strict `JSON.parse(record.json)`.
+  Parsing failure vetoes recovery even if SSE's repair-capable completeness
+  parser accepts the wire string. Existing `node:util.isDeepStrictEqual` usage
+  elsewhere in Meridian supplies the structural comparison convention.
+- **Actual budget:** the same wrapper records the constructed query's maxTurns,
+  including `non_stream_resume_replay` and `non_stream_model_fallback`. Both
+  regression scripts prove budgets `[1, 1, 3, 1]`: initial turn, capped resume,
+  lifted retry, then fresh one-turn fallback that can recover.
+- **Helpers:** use `env("PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY")`, honoring the
+  legacy `CLAUDE_PROXY_` prefix, and ignore absent/non-string input deltas just
+  as SSE does. Existing alias precedence is not changed.
+
+**contentBlocks staleness is possible.** Error-bearing assistant messages do
+not set the retry loop's `didYieldContent`, yet the consumer still assembles
+those messages into `contentBlocks`. A retry can therefore inherit text or
+calls. The new path fails closed if any content existed at a later attempt's
+start. It neither clears that content nor refactors the pre-existing assembly,
+retry, captured-recovery or normal-completion paths. The new stale-content
+regression proves this concrete error-assistant/retry shape.
+
+### Evidence and an unresolved existing-test contradiction
+
+Focused command (before production edits, then with the patch):
+
+```sh
+env -u TMPDIR bun test src/__tests__/passthrough-early-stop-integration.test.ts --timeout 30000 --test-name-pattern 'JSON capped proof round2'
+```
+
+RED on unchanged `9434c189` production: exit **1**, **3 pass / 15 fail**, 32
+assertions. GREEN: exit **0**, **18 pass / 0 fail**, 58 assertions. Cases cover
+started-but-unsurfaced complete/incomplete blocks, duplicate IDs, extra
+rejections, missing wire records, wire/metadata input mismatch, stale wire,
+rejection, active-index and content across retries, fresh independent proof,
+both fallbacks after cap lift, the legacy kill switch, three malformed deltas,
+and nested property-order-independent input equality. Tests were added only;
+all prior tests are byte-for-byte unchanged. Initial generated test names lost
+shell interpolation; `red-focused-final.log` is the named, typechecked RED.
+
+**The requested whole-file/npm gates are not green.** The unchanged test
+`JSON capped refused batch safety (hidden-response)` starts an extra client
+block on the wire, supplies neither visible delivery nor CLI rejection for it,
+and expects HTTP 200. Blocker 1 explicitly requires that shape to fail closed.
+The patch returns HTTP 500, as SSE's every-wire-block proof requires. The first
+whole-file run is **308 pass / 1 fail**, 3123 assertions; the npm chain stops at
+that same failure. The operator also required existing tests to stay unchanged,
+so this follow-up deliberately does not change that expectation or weaken the
+proof to obtain a green gate. The contradictory acceptance requirements remain
+an operator resolution, not an accepted test failure or a merge-ready claim.
+The structured-question tool is unavailable on this engineer tool surface;
+`hookctl doctor` exits 0 but does not supply that missing tool.
+
+Comparison with both original production and tests from `9434c189`: whole file
+exit **0**, **291 pass / 0 fail**, 3069 assertions; complete `env -u TMPDIR npm
+test` exit **0**, **9158 pass / 0 fail / 28 skip**, 51206 assertions across 32
+isolated runs. The first baseline npm comparison exceeded its 600-second tool
+limit; the complete rerun used a longer limit. The working patch was restored
+and focused GREEN rerun afterward. No other checkout was used for comparison.
+
+Raw logs, exit receipts, final-head commands/results and SHA are retained under
+`/mnt/ai-scratch/meridian-json-capped-500/evidence/round2/verification.md` and
+adjacent artifacts. Final-head verification includes the full offline 60-row
+real-CLI wire matrix and separate JSON two/three-call probes, using CLI
+**2.1.322**, Agent SDK 0.2.141 and disposable tmpfs state. Their zero-live-call
+assertions prove transport, not actual model naming or provider cache billing.
+No push, merge, pack/install, service restart, activation or live model calls
+are authorized. A further independent final-patch review is not claimed here;
+review/integration/live acceptance gates remain with the parent workflow.
+
 ## Capped JSON name-dispatch-refused recovery (2026-11-15)
 
 **Branch-only fix on `fix/json-capped-refused-500`, based on `51cea9b4`.**

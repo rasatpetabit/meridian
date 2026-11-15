@@ -1,3 +1,16 @@
+## Recovered passthrough streaming outcome logs
+
+The logging-only catch-path fix uses the installed Pi AI provider, real SDK/native
+Haiku 5.5 and isolated baseline/candidate CLI instances with
+`OPENCODE_CLAUDE_PROVIDER_DEBUG=1` and `MERIDIAN_PASSTHROUGH=1`. Both requests
+must end in the same clean client tool handoff: baseline logs `upstream.failed`
+and `proxy.anthropic.error`, candidate logs one `upstream.completed` with
+`recovery=tool_use` and `sdkTermination=max_turns`, without either failure event.
+The provider must send exactly one declared tool without its hidden deferred
+placeholder, which would lift the cap and bypass this catch. See
+[procedure, isolation, exit audit and red/green evidence](docs/maintenance/PASSTHROUGH_HANDOFF_LOGGING.md).
+No Pi session or production instance is started or signalled by the procedure.
+
 ## Signal-stopped requests and shutdown drain
 
 `node scripts/e2e-signal-exit.mjs` uses separately built baseline/fixed CLI

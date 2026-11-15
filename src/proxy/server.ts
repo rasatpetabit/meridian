@@ -4917,6 +4917,10 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
           // drop the rest from the client-facing set.
           const streamedToolUseIds = new Set<string>()
           const emittedToolUseIds = new Set<string>()
+          const rejectedToolNames = new Map<string, string>()
+          const toolBlockRecords = new Map<string, StreamedToolBlockRecord>()
+          const activeToolBlocks = new Map<number, StreamedToolBlockRecord>()
+          let lastAttemptMaxTurns: number | undefined
           let nextPassthroughToolCallAssistantUuid: string | undefined
           let nextPassthroughToolCallIds: string[] | undefined
           let sawCanonicalResult = false
@@ -5019,6 +5023,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                     advisorModel,
                   }, requestAbort.controller)
                   attemptMaxTurns = attemptQuery.options.maxTurns
+                  lastAttemptMaxTurns = attemptMaxTurns
                   for await (const event of runSdkQueryAttempt(attemptQuery, requestAbort.controller.signal, requestMeta, "non_stream", managedSdkAttemptLocators())) {
                     // Capture Claude Max subscription quota updates emitted by
                     // the SDK as rate_limit_event. We snapshot them in this
@@ -5302,8 +5307,9 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 break
               }
               if (passthrough && message.type === "user") {
-                for (const { id } of cliRejectedToolResults(message.message.content, true)) {
+                for (const { id, name } of cliRejectedToolResults(message.message.content, true)) {
                   cliUnavailableToolIds.add(id)
+                  rejectedToolNames.set(id, resolveClientToolName(name, passthroughMcp?.clientNameByAlias, passthroughMcpName))
                 }
               }
               // Checkpoint settlement: the deny tool_results identify when all
@@ -5371,6 +5377,28 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 noteGenerationEvent()
                 const event = message.event
                 const eventType = event?.type
+                if (passthrough) {
+                  if (eventType === "message_start") activeToolBlocks.clear()
+                  if (eventType === "content_block_start" && isClientForwardedToolUse(event.content_block, clientToolPrefix, clientToolSearch)) {
+                    const block = event.content_block
+                    const record: StreamedToolBlockRecord = {
+                      id: block.id,
+                      name: resolveClientToolName(block.name, passthroughMcp?.clientNameByAlias, passthroughMcpName),
+                      json: "",
+                      startedInputObject: block.input !== null && typeof block.input === "object" && !Array.isArray(block.input),
+                      forwardedStart: true,
+                      naturalStop: false,
+                    }
+                    activeToolBlocks.set(event.index, record)
+                    toolBlockRecords.set(block.id, record)
+                  } else if (eventType === "content_block_delta" && event.delta.type === "input_json_delta") {
+                    const record = activeToolBlocks.get(event.index)
+                    if (record) record.json += event.delta.partial_json
+                  } else if (eventType === "content_block_stop") {
+                    const record = activeToolBlocks.get(event.index)
+                    if (record) record.naturalStop = true
+                  }
+                }
                 if (eventType === "message_delta" || eventType === "message_stop") {
                   sawTurnBoundarySignal = true
                   releaseHeldDenies(eventType)
@@ -5580,7 +5608,33 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               // No client-disconnect abort reaches this path.
               abortIsOurs: true,
             })
-            if (canRecoverAsToolUse) {
+            const visibleCalls = contentBlocks.filter(block => block.type === "tool_use")
+            const confirmedToolUnavailable = process.env.MERIDIAN_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY !== "0" &&
+              visibleCalls.length > 0 && visibleCalls.every(block => {
+                if (typeof block.id !== "string" || typeof block.name !== "string" ||
+                  block.input === null || typeof block.input !== "object" || Array.isArray(block.input)) return false
+                const record = toolBlockRecords.get(block.id)
+                return record !== undefined && record.name === block.name &&
+                  rejectedToolNames.get(block.id) === block.name && streamedToolBlockVeto(record) === undefined
+              })
+            const canRecoverRejectedToolUses = confirmedToolUnavailable && lastAttemptMaxTurns === 1 &&
+              !requestAbort.abortSnapshot().aborted && !durableWritesRevoked &&
+              uncapturedRecoveryVeto({
+                reason: sdkTerm.reason, passthrough, capturedToolUses: capturedToolUses.length,
+                streamedToolUses: visibleCalls.length, droppedToolUseIds: droppedToolUseIds.size,
+                sawDuplicateToolUse, forceSingleToolUse, earlyStopFired,
+                uncapturedRecoveryEnabled: false, confirmedToolUnavailable, attemptedMaxTurns: lastAttemptMaxTurns,
+              }) === undefined
+            if (canRecoverRejectedToolUses) {
+              if (!(await invalidateNonStreamMapping())) {
+                throw new Error("Shared session mapping changed before rejected non-stream recovery invalidation")
+              }
+              lastStopReason = "tool_use"
+              claudeLog("passthrough.max_turns_recovered", {
+                mode: "non_stream", reason: sdkTerm.reason, captured: 0, rejected: visibleCalls.length,
+              })
+              if (lastUsage) logUsage(requestMeta.requestId, lastUsage)
+            } else if (canRecoverAsToolUse) {
               if (idleVerdict) {
                 idleStalls.clear(idleStallSessionKey)
               }

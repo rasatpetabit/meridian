@@ -74,6 +74,10 @@ export const ROWS = [
   // JSON normal completion forwards every refused call; deferred tools allow the hidden turn to drain.
   { label: "json-deferred-refused-2", args: ["--deferred", "--non-stream", "--calls=2"] },
   { label: "json-deferred-refused-3", args: ["--deferred", "--non-stream", "--calls=3"] },
+  // JSON one-turn caps hand off complete refused batches, then replay real results fresh.
+  { label: "json-capped-refused-1", args: ["--non-stream", "--calls=1"] },
+  { label: "json-capped-refused-2", args: ["--non-stream", "--calls=2"] },
+  { label: "json-capped-refused-3", args: ["--non-stream", "--calls=3"] },
   // Mixed batches whose uncaptured calls are name-dispatch refusals resume with hybrid results.
   { label: "mixed-bare-2-1-follow", args: ["--mixed", "--calls=2", "--bare-call=1", "--follow-on"] },
   { label: "mixed-bare-2-2-follow", args: ["--mixed", "--calls=2", "--bare-call=2", "--follow-on"] },
@@ -104,7 +108,7 @@ function fail(message) {
 function assertRowList() {
   const forbidden = /^(?:--claude|--source-root|--wire)(?:=|$)/
   const labels = new Set()
-  if (ROWS.length !== 67) fail(`wire matrix has ${ROWS.length} rows, expected 67`)
+  if (ROWS.length !== 70) fail(`wire matrix has ${ROWS.length} rows, expected 70`)
   for (const row of ROWS) {
     if (labels.has(row.label)) fail(`duplicate wire-matrix row ${row.label}`)
     labels.add(row.label)

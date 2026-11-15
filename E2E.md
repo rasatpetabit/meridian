@@ -57,6 +57,11 @@ Rejected parallel checkpoint controls (all use the same `--claude=...`):
   exactly once, retained mapping/resume telemetry, and no CLI rejection text in
   any upstream request. Deferred, malformed, JSON and unstreamed mixed batches
   still replay.
+- `--non-stream --calls=1|2|3`: at `maxTurns=1`, JSON must return every
+  complete CLI name-dispatch-refused call in order with `stop_reason: tool_use`,
+  evict the checkpoint, and replay every real follow-up result exactly once.
+  The committed wire matrix includes all three counts; no native JSON marker
+  or canonical single-call SSE retention exception applies to these responses.
 - `--deferred --calls=2`: an unused deferred tool lifts the cap to 4; both bare
   calls are rejected, then a hidden second model turn completes successfully.
   Normal SSE completion must evict the checkpoint too.

@@ -151,9 +151,25 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   turn of a client-forwarded batch without exposing its content or replacing
   the visible stop reason or assistant UUID. Multi-call mappings still evict
   and the next request replays every real client result; this changes neither
-  SSE behavior nor checkpoint eligibility. The separate JSON
-  `error_max_turns` recovery limit remains outside this normal-completion fix.
-  See the dated JSON forwarding evidence in
+  SSE behavior nor checkpoint eligibility.
+  At the proxy's one-turn cap, JSON also recovers `error_max_turns` when every
+  visible call has an exact ID/resolved-name-matched CLI `No such tool available`
+  rejection and a naturally closed, complete object input on the wire, with
+  object inputs in the visible assistant metadata. Reuse the SSE uncaptured
+  recovery veto and input-completeness checks; partial proof, mismatched
+  names/IDs, incomplete blocks, cancellation, revoked writes, duplicate or
+  forced-single calls, and the recovery kill switch keep failing closed.
+  This does not enable opt-in abort-window recovery or larger-budget JSON
+  error recovery. As in SSE, a fully rejected undeclared name is delivered as
+  written for the client's invalid-tool result: rejection proves it ran nowhere;
+  declaration is required only without that proof. The response-identity gate
+  above remains authoritative for content; hidden fragments never join the
+  recovered JSON batch. Invalidate the exact-generation mapping before releasing
+  recovered calls, and fail closed on an eviction conflict. JSON publishes no
+  native-call marker and supplies no capture proof for rejected calls, including
+  a single call, so its existing publication guard cannot retain these mappings.
+  Follow-up real results therefore replay fresh, each exactly once.
+  See the dated JSON forwarding and capped-recovery evidence in
   `docs/maintenance/MIXED_REJECTION_CHECKPOINT.md`.
 - **A canonical single-turn name-dispatch refusal can retain a keyed tool
   checkpoint without PreToolUse capture.** The CLI can reject a bare client

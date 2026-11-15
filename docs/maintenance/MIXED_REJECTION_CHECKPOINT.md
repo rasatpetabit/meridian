@@ -1,5 +1,123 @@
 # Mixed and multi-turn rejected checkpoint evidence
 
+## Capped JSON name-dispatch-refused recovery (2026-11-15)
+
+**Branch-only fix on `fix/json-capped-refused-500`, based on `51cea9b4`.**
+This supersedes the capped non-stream HTTP 500 limitation recorded below, not
+any checkpoint eligibility or hybrid continuation policy. Work is confined to
+`/srv/dev/ai/meridian-wt-json-capped-500`; no other engineer's worktree, installed
+package, service, live cache, publication or integration is changed. No live
+model calls. Platform: Linux x64, Bun 1.3.14, Agent SDK 0.2.141, actual Claude
+Code **2.1.322** at `/home/ras/.local/share/claude/versions/2.1.322`.
+
+### Proof and delivery boundary
+
+The JSON error branch previously recovered only hook-captured calls or
+truncatable text. At the one-turn cap, a batch refused before PreToolUse has
+neither; the complete visible tool batch therefore ended in HTTP 500.
+The new branch reuses `cliRejectedToolResults`, `uncapturedRecoveryVeto`,
+`streamedToolBlockVeto` and exact-generation invalidation rather than inventing
+a separate rejection, input parser or session policy. It requires the actual
+attempt budget to be one, every visible call to match both wire and CLI
+rejection by ID/resolved name, naturally closed complete wire object inputs,
+object inputs in assistant metadata, and no cancellation or revoked writes.
+Only exact `No such tool available` refusals qualify this JSON path; generic
+errors and InputValidationError do not extend the approved boundary. The
+existing duplicate, forced-single and recovery-disable vetoes remain in force.
+Larger-budget JSON errors and opt-in abort-window recovery remain unchanged.
+
+**Undeclared names follow SSE's existing rule**, documented beside
+`confirmedToolUnavailable` / `uncapturedRecoveryVeto` in `server.ts` and in
+`errors.ts`: an exact rejection for every call proves none ran, so even an
+undeclared name is delivered as the model wrote it for the client's own
+invalid-tool result. Declaration is required without that proof. A call under
+a foreign MCP prefix is not client-forwarded and supplies no recovery proof.
+Partial rejection, wrong name/ID, unclosed/truncated/non-object input and
+unproved calls stay errors. The existing JSON response-identity gate is not
+modified: only its visible content participates in recovery. Hidden response
+text, thinking and tool calls remain suppressed, including SDK index reuse
+on a later message_start.
+
+Before delivery, the recovery must invalidate its exact mapping generation;
+a CAS loser withholds all calls and preserves the winning mapping. JSON
+publishes no native-call marker and no capture proof for these refusals. Its
+unchanged publication guard therefore cannot retain even a single refused
+call's checkpoint. Follow-ups replay fresh, not native or hybrid resume, and
+every supplied real result appears exactly once. There is no new product,
+architecture, schema, dependency, public interface or checkpoint-policy choice.
+
+### RED before the fix; GREEN with the same assertions
+
+The named offline reproducer with `--non-stream --calls=2` and `--calls=3`
+each exits **1** with baseline `51cea9b4` server.ts:
+
+```text
+500 !== 200
+Claude Code returned an error result: Reached maximum number of turns (1)
+```
+
+The first primary tests were written and run before production edits. Final
+focused RED uses all final tests with only server.ts restored byte-for-byte
+from `git show 51cea9b4:src/proxy/server.ts`, then restores the implementation
+in Python `finally` (`IMPLEMENTATION_RESTORED True`):
+
+```sh
+env -u TMPDIR bun test src/__tests__/passthrough-early-stop-integration.test.ts --timeout 30000 --test-name-pattern 'JSON capped refused batch|non-stream: a CLI-rejected call'
+# RED exit 1: 13 pass, 11 fail, 53 assertions, 267 filtered out.
+# GREEN exit 0: 24 pass, 0 fail, 143 assertions, 267 filtered out.
+```
+
+Coverage includes one/two/three calls, ordinary and late same-response
+metadata, exact ordered IDs/names/inputs, tool_use stop reason, no mapping,
+no resume/resumeSessionAt on the follow-up, exactly one occurrence of every
+real client result, aliases, declared/undeclared names, hidden second-response
+content, partial/wrong proof, incomplete inputs, absent wire proof, foreign
+MCP prefix, abort, larger budget, kill switch, unrelated process failure and
+mapping conflict. Existing JSON identity and captured-call tests remain intact.
+The initial generated fixture suffered shell interpolation of template
+variables; `red-targeted.log` is invalid evidence. The corrected fixture was
+read back and rerun (`red-targeted-valid.log`) before production edits; only
+`red-targeted-final.log` qualifies the final assertion set. Early-stop-disabled
+fixtures initially expected the one-turn cap despite requesting four turns;
+they are now correctly a larger-budget fail-closed control, not an expanded
+recovery policy.
+
+Initial whole-file and npm-test gates each failed only the two old tests that
+explicitly expected JSON rejection recovery to remain streaming-only. The
+unchanged baseline (both server.ts and the test file from `51cea9b4`) passes
+the whole file **269/0, 2930 assertions**, and the complete `env -u TMPDIR npm
+test` chain exits **0**. Thus those two failures are intended behavior-change
+expectations, not a pre-existing failure excuse. The tests now require exact
+client JSON content, tool_use and eviction for declared and undeclared names.
+
+### Matrix and final-head evidence
+
+Added `json-capped-refused-2` (`--non-stream --calls=2`) and
+`json-capped-refused-3` (`--non-stream --calls=3`), plus the single-call replay
+control `json-capped-refused-1`. The row guard is **60**, up from 57. No R1,
+client-call equality, result fidelity, retry or zero-live-call assertion was
+relaxed. The initial complete run passes **60/60**, exit 0; every row is
+required by the unchanged runner to report `liveModelCalls:0`.
+
+Durable local evidence and final committed-head receipts are under
+`/mnt/ai-scratch/meridian-json-capped-500/evidence/`: baseline/RED/GREEN logs,
+explicit red/green wire captures, final focused/full-file/full-suite logs,
+typecheck/build/diff receipts, `matrix.log`, and `verification.md` with the
+verified SHA and final counts. Bookkeeping gates use `env -u TMPDIR`.
+Real-CLI state uses a fresh `mktemp -d /tmp/meridian-capped.XXXXXX` tmpfs tree,
+not virtiofs; the complete runner and scratch root are removed after success.
+No production install is authorized, so post-install journal/cache gates do
+not apply in this branch-only task.
+
+Self-review checked recovery proof, foreign/internal tools, hidden response
+identity, cancellation, CAS loss, single-call eviction and existing captured
+and SSE behavior. Independent cross-vendor review is not claimed on this
+engineer's available tool surface. Actual live-model/client acceptance,
+provider prompt-cache billing, CI, PR, integration and activation remain
+unperformed; live calls and publication are explicitly prohibited. Offline
+real-CLI replay proves transport/result fidelity, not provider billing. Fresh
+replay still cannot restore SDK-only context absent from client history.
+
 ## JSON forwarding rebase onto 74a5c99d (2026-11-15)
 
 **Branch-only requalification; no integration, publication, installation, service

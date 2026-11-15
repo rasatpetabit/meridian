@@ -4912,6 +4912,119 @@ describe("Integration: passthrough early stop", () => {
     })
   }
 
+  for (const count of [1, 2, 3]) for (const lateMetadata of [false, true]) {
+    it(`JSON capped refused batch returns ordered calls and replays results (${JSON.stringify({ count, lateMetadata })})`, async () => {
+      const sessionKey = `json-capped-${count}-${lateMetadata}-${TEST_RUN_ID}`
+      usedSessionKeys.add(sessionKey)
+      const headers = { "x-meridian-agent": "pi", "user-agent": "pi/1.4.0", "x-session-affinity": sessionKey }
+      const calls = Array.from({ length: count }, (_, index) => ({
+        type: "tool_use", id: `capped-refused-${index}`, name: "read", input: { file_path: `/file-${index}` },
+      }))
+      const fragments = calls.map(call => {
+        const fragment = assistantMessage([call])
+        fragment.message.id = "msg_capped_refused"
+        return { ...fragment, test_skip_pre_tool_hook: true }
+      })
+      mockMessages = [messageStart("msg_capped_refused"),
+        ...calls.flatMap((call, index) => [toolUseBlockStart(index, call.name, call.id),
+          inputJsonDelta(index, JSON.stringify(call.input)), ...(lateMetadata ? [] : [fragments[index]!]), blockStop(index)]),
+        messageDelta("tool_use"), messageStop(),
+        ...(lateMetadata ? [fragments[0]!, ...calls.map(call => unavailableToolMessage(call.id, call.name)), ...fragments.slice(1)]
+          : calls.map(call => unavailableToolMessage(call.id, call.name))),
+        { type: "result", subtype: "error_max_turns", is_error: true },
+      ]
+      mockTerminalError = new Error("Claude Code returned an error result: Reached maximum number of turns (1)")
+      const messages = [{ role: "user", content: "read every capped file" }]
+      const response = await post(app, { model: "opus[1m]", max_tokens: 400, stream: false,
+        tools: [READ_TOOL], messages }, "unused", headers)
+      const body = await response.json()
+      expect(response.status).toBe(200)
+      expect(body.content).toEqual(calls)
+      expect(body.stop_reason).toBe("tool_use")
+      expect(capturedQueryParamsAll[0].options.maxTurns).toBe(1)
+      expect(yieldedCount).toBe(mockMessages.length)
+      expect(lookupSharedSession(sessionKey)).toBeUndefined()
+
+      mockTerminalError = undefined
+      mockMessages = [assistantMessage([{ type: "text", text: "files read" }])]
+      const next = await post(app, { model: "opus[1m]", max_tokens: 400, stream: false, tools: [READ_TOOL],
+        messages: [...messages, { role: "assistant", content: body.content },
+          { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
+            content: `REAL_CLIENT_RESULT_${call.id}` })) }],
+      }, "unused", headers)
+      expect(next.status).toBe(200)
+      await next.text()
+      expect(capturedQueryParamsAll).toHaveLength(2)
+      expect(capturedQueryParamsAll[1].options.resume).toBeUndefined()
+      expect(capturedQueryParamsAll[1].options.resumeSessionAt).toBeUndefined()
+      const replay = await serializedPrompt(capturedQueryParamsAll[1].prompt)
+      for (const call of calls) expect(replay.split(`REAL_CLIENT_RESULT_${call.id}`)).toHaveLength(2)
+      expect(replay).not.toContain("No such tool available")
+    })
+  }
+
+  for (const shape of ["undeclared", "alias", "hidden-response", "partial", "wrong-name", "wrong-id",
+    "incomplete-json", "unclosed", "non-object", "no-wire", "foreign-prefix", "mapping-conflict",
+    "larger-budget", "disabled", "abort", "other-error"] as const) {
+    it(`JSON capped refused batch safety (${shape})`, async () => {
+      if (shape === "larger-budget") process.env.MERIDIAN_PASSTHROUGH_EARLY_STOP = "0"
+      if (shape === "disabled") process.env.MERIDIAN_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY = "0"
+      const sessionKey = `json-capped-safety-${shape}-${TEST_RUN_ID}`
+      usedSessionKeys.add(sessionKey)
+      const calls = [0, 1].map(index => ({ type: "tool_use", id: `safety-${index}`,
+        name: shape === "undeclared" && index === 1 ? "not_declared" : shape === "alias" ? "mcp__oc__read"
+          : shape === "foreign-prefix" ? "mcp__other__read" : "read",
+        input: { file_path: `/file-${index}` } }))
+      const assistant = assistantMessage(calls)
+      assistant.message.id = "msg_safety"
+      const hidden = assistantMessage([{ type: "text", text: "TURN2_PRIVATE_TEXT" },
+        { type: "thinking", thinking: "TURN2_PRIVATE_THINKING", signature: "hidden" },
+        { type: "tool_use", id: "hidden-call", name: "read", input: { file_path: "/hidden" } }])
+      hidden.message.id = "msg_hidden"
+      mockMessages = [messageStart("msg_safety"),
+        ...(shape === "no-wire" ? [] : calls.flatMap((call, index) => [toolUseBlockStart(index, call.name, call.id),
+          inputJsonDelta(index, index === 1 && shape === "incomplete-json" ? '{"file_path":'
+            : index === 1 && shape === "non-object" ? '[]' : JSON.stringify(call.input)),
+          ...(index === 1 && shape === "unclosed" ? [] : [blockStop(index)])])),
+        messageDelta("tool_use"), messageStop(), { ...assistant, test_skip_pre_tool_hook: true },
+        unavailableToolMessage(calls[0]!.id, calls[0]!.name),
+        ...(shape === "partial" ? [] : [unavailableToolMessage(shape === "wrong-id" ? "wrong-id" : calls[1]!.id,
+          shape === "wrong-name" ? "wrong_name" : calls[1]!.name)]),
+        ...(shape === "hidden-response" ? [messageStart("msg_hidden"), toolUseBlockStart(0, "read", "hidden-call"),
+          inputJsonDelta(0, '{"file_path":"/hidden"}'), blockStop(0),
+          { ...hidden, test_skip_pre_tool_hook: true }, messageDelta("end_turn"), messageStop()] : []),
+        { type: "result", subtype: "error_max_turns", is_error: true },
+      ]
+      mockTerminalError = new Error(shape === "other-error" ? "Claude Code process exited with code 1"
+        : "Claude Code returned an error result: Reached maximum number of turns (1)")
+      if (shape === "abort") mockBeforeTerminalError = () => {
+        capturedQueryParams.options.abortController.abort()
+        expect(capturedQueryParams.options.abortController.signal.aborted).toBe(true)
+      }
+      if (shape === "mapping-conflict") mockBeforeTerminalError = async () => {
+        expect(await storeSharedSession(sessionKey, "concurrent-winner")).toBeTruthy()
+      }
+      const response = await post(app, { model: "opus[1m]", max_tokens: 400, stream: false,
+        tools: [READ_TOOL], messages: [{ role: "user", content: "read safety files" }] }, `json-capped-safety-${shape}`,
+        { "x-meridian-agent": "pi", "user-agent": "pi/1.4.0", "x-session-affinity": sessionKey })
+      const body = await response.json()
+      if (["undeclared", "alias", "hidden-response"].includes(shape)) {
+        expect(response.status).toBe(200)
+        expect(body.content).toEqual(calls.map(call => ({ ...call, name: call.name === "mcp__oc__read" ? "read" : call.name })))
+        expect(body.stop_reason).toBe("tool_use")
+        expect(JSON.stringify(body)).not.toContain("TURN2_PRIVATE")
+        expect(JSON.stringify(body)).not.toContain("hidden-call")
+      } else {
+        expect(response.status).toBeGreaterThanOrEqual(400)
+        expect(body.type).toBe("error")
+        expect(body.content).toBeUndefined()
+        if (shape === "mapping-conflict") {
+          expect(lookupSharedSession(sessionKey)?.claudeSessionId).toBe("concurrent-winner")
+        }
+      }
+    })
+  }
+
   // Uncaptured calls must fail closed regardless of the CLI refusal wording.
   for (const shape of [
     { stream: true, deferred: false, mixed: true, inputRejected: true, single: false },
@@ -5582,18 +5695,21 @@ describe("Integration: passthrough early stop", () => {
     expect(events.filter(e => e.event === "error")).toHaveLength(1)
   })
 
-  // Rejection recovery is streaming-only (docs/configuration.md); a declared
-  // and an undeclared name fail alike without it.
+  // JSON matches SSE delivery for explicit name-dispatch refusals, including
+  // undeclared names; unlike the SSE single-call exception it always replays.
   for (const name of ["bash", "bash_placeholder"]) {
-    it(`non-stream: a CLI-rejected call (${name}) is not recovered`, async () => {
+    it(`non-stream: a CLI-rejected call (${name}) is handed to the client`, async () => {
       delete process.env.MERIDIAN_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY
       rejectedTurn([{ id: "toolu_rejected", name }])
       const res = await post(app, {
         model: "claude-sonnet-4-5", max_tokens: 400, stream: false, tools: [BASH_TOOL],
         messages: [{ role: "user", content: "list the files" }],
       }, `es-rejected-nonstream-${name}`)
-      expect(res.status).toBe(500)
-      expect((await res.json()).error.message).toContain("Reached maximum number of turns (1)")
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body.content).toEqual([{ type: "tool_use", id: "toolu_rejected", name, input: { command: "ls" } }])
+      expect(body.stop_reason).toBe("tool_use")
+      expect(lookupSharedSession(`es-rejected-nonstream-${name}-${TEST_RUN_ID}`)).toBeUndefined()
     })
   }
 

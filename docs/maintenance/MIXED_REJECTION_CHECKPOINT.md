@@ -12,6 +12,8 @@ live cache and services were not modified or signalled. No live model calls.
 
 **2026-11-15:** Internal StructuredOutput retries are not client calls: content and stop_reason stay on the response-id gate, and the client UUID map updates whenever no client-forwarded call is visible, so a schema-validation retry records the successful attempt.
 
+**2026-11-15:** Rebased onto `aebca07f`, preserving both checkpoint records; the 46-row real-CLI offline cache wire matrix passed **46/46** (every exit 0, `liveModelCalls:0`), and the original 21 argument rows passed **21/21** under the base's captured-stream hybrid policy; evidence: `/mnt/ai-scratch/meridian-json-integrate/evidence/`.
+
 ### Reproduced cause and same-turn rule
 
 Tracker growth cannot prove model-turn membership. With early stop disabled,

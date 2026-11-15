@@ -4881,6 +4881,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
         if (!stream) {
           const contentBlocks: Array<Record<string, unknown>> = []
           let assistantMessages = 0
+          let passthroughToolTurnMessageId: string | undefined
           let hasStructuredOutput = false
           let structuredOutput: unknown
           const upstreamStartAt = Date.now()
@@ -5313,7 +5314,6 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                   if (isClientForwardedToolUse(block, clientToolPrefix, clientToolSearch)) emittedToolUseIds.add(block.id)
                 }
               }
-              let assistantAddedForwardedCall = false
               if (
                 passthrough &&
                 message.type === "assistant" &&
@@ -5324,9 +5324,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 // assistant metadata for call N+1. Keep extending the candidate
                 // until the full client-visible ID set is covered; internal and
                 // duplicate calls are filtered by noteAssistantMessage.
-                const expectedBefore = earlyStop.expected.size
                 noteAssistantMessage(earlyStop, message, clientToolPrefix, clientToolSearch)
-                assistantAddedForwardedCall = earlyStop.expected.size > expectedBefore
               } else if (passthrough && message.type === "user" && !earlyStopFired) {
                 noteUserContent(earlyStop, (message as any).message?.content)
               }
@@ -5389,9 +5387,13 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               if (message.type === "assistant") {
                 if (!sawTurnBoundarySignal) releaseHeldDenies("assistant_message")
                 assistantMessages += 1
-                // One Anthropic assistant response may combine several SDK
-                // assistant fragments (for example parallel tool calls).
-                if (!passthrough || earlyStop.expected.size === 0 || assistantAddedForwardedCall) {
+                const hasVisibleToolUse = passthrough && contentBlocks.some(b => b.type === "tool_use")
+                const messageId = message.message.id
+                const isPassthroughTurn2 = hasVisibleToolUse && !(
+                  typeof messageId === "string" && messageId.length > 0 &&
+                  messageId === passthroughToolTurnMessageId
+                )
+                if (!isPassthroughTurn2) {
                   sdkUuidMap = withClientAssistantUuid(
                     sdkUuidMap,
                     allMessages.length,
@@ -5426,12 +5428,6 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 //    contain an encrypted signature that is only valid inside Claude's
                 //    native context. Non-native clients (OpenCode, GPT-compat) have no
                 //    renderer for them and may misinterpret or choke on the signature.
-                const isPassthroughTurn2 =
-                  passthrough &&
-                  assistantMessages > 1 &&
-                  !assistantAddedForwardedCall &&
-                  contentBlocks.some((b) => b.type === "tool_use")
-
                 if (isPassthroughTurn2) {
                   // Skip all content from Turn 2 onwards in passthrough mode
                   claudeLog("passthrough.turn2_skipped", { mode: "non_stream", assistantMessages })
@@ -5472,6 +5468,9 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 // Capture token usage from the assistant message
                 const msgUsage = message.message.usage as TokenUsage | undefined
                 if (msgUsage) lastUsage = { ...lastUsage, ...msgUsage }
+                if (passthrough && !hasVisibleToolUse && contentBlocks.some(b => b.type === "tool_use")) {
+                  passthroughToolTurnMessageId = typeof messageId === "string" && messageId.length > 0 ? messageId : undefined
+                }
                 if (!isPassthroughTurn2 && typeof message.message.stop_reason === "string") {
                   // Hidden digest turns are consumed only for durability; they
                   // must not replace the client-visible tool_use stop reason.

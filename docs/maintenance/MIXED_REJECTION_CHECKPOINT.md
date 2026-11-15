@@ -1,5 +1,269 @@
 # Mixed and multi-turn rejected checkpoint evidence
 
+## JSON fragment turn identity follow-up (2026-11-15)
+
+**Status: fixed and locally verified on `fix/json-refused-forwarding`, as a
+follow-up to b387dc60; no integration, publication or activation.** This
+section supersedes the tracker-growth turn classification in the original
+JSON forwarding section below. Both cross-vendor review blockers were first
+reproduced through the real HTTP handler with the mocked SDK, not accepted
+from code inspection alone. Production, other worktrees, installed packages,
+live cache and services were not modified or signalled. No live model calls.
+
+### Reproduced cause and same-turn rule
+
+Tracker growth cannot prove model-turn membership. With early stop disabled,
+its expected set never freezes. With early stop enabled, bare-name refusals
+can precede message_delta/message_stop, and settlement is checked only on
+assistant/user messages. The next message_start reopens generation before
+its assistant arrives; noteAssistantMessage adds the hidden retry before
+settlement can run. Missing assistant UUIDs independently prevent settlement.
+The b387dc60 content bypass therefore leaks a new hidden client call together
+with that fragment's text and thinking in both reviewed shapes.
+
+The non-stream response now remembers the Anthropic response `message.id` of
+the fragment that first actually puts a tool_use in contentBlocks. Once that
+happens, a later fragment is visible only if it carries the **same nonempty
+response ID**. Missing, empty or different IDs suppress the entire fragment,
+not only its tool calls. The same predicate gates client assistant UUID
+selection and stop_reason updates. This does not depend on tracker growth,
+settlement, SDK UUIDs or message_stop, so late metadata is still accepted.
+The first tool-bearing fragment remains visible even if its ID is missing;
+subsequent membership cannot then be proven and fails closed, as base did.
+
+No tracker gating change was necessary: the existing non-stream observation
+and settlement behavior is left intact, as is SSE. Changing it merely to
+match SSE would alter unrelated checkpoint inputs without helping identity.
+Existing kill-switch, UUID/undo, single-call checkpoint and publication
+controls pass in the focused suite. Multi-call eviction and fresh replay are
+unchanged. No new product or architecture policy was selected; the change
+enforces the existing hidden-turn suppression invariant.
+
+Reused the existing HTTP integration mock, early-stop/checkpoint controls and
+offline real-CLI harness. Searched the tracker, JSON content assembly and
+UUID update sites, SSE turn latch, helpers and existing late-metadata tests.
+The measured shared response ID supplies the missing proof; no custom
+transport, wire latch, SDK/CLI modification or new operational setting.
+
+### RED before production edits; GREEN after identity fix
+
+From `/srv/dev/ai/meridian-wt-json-forwarding`:
+
+```sh
+bun test src/__tests__/passthrough-early-stop-integration.test.ts --timeout 30000 --test-name-pattern 'JSON turn identity'
+```
+
+The initial valid RED on exact b387dc60 exits **1**, **0 pass / 2 fail**, four
+assertions: both cases return the two ordered turn-1 calls **plus**
+`TURN2_PRIVATE_TEXT`, `TURN2_PRIVATE_THINKING` and `turn2-new-call`. The first
+throwaway fixture had shell-expanded template variables and duplicate call
+IDs; it is retained as `invalid-fixture-initial.log` but is not defect evidence.
+The corrected fixture was read back and rerun before changing production code.
+
+Both tests use maxTurns 4 through a deferred tool, two distinct CLI-refused
+calls with no PreToolUse hook, and a hidden second response with a new call,
+text and signed thinking. All refusals precede the first response's wire end;
+no assistant/user follows that end until turn 2 is generating.
+
+| Case | b387dc60 RED | Final GREEN |
+|---|---|---|
+| A: `earlyStopEnabled=false`, kill switch `0` | exit 1: hidden call/text/thinking visible | exit 0: 1 pass / 0 fail, 16 assertions |
+| B: `earlyStopEnabled=true`, refusals before wire end | exit 1: hidden call/text/thinking visible | exit 0: 1 pass / 0 fail, 16 assertions |
+| A with both tool fragments' UUIDs absent | FAIL: same leak | PASS |
+| B with both tool fragments' UUIDs absent | FAIL: same leak | PASS |
+
+Individual A/B commands (each RED is 0 pass / 1 fail, two assertions;
+248 filtered out in both RED and GREEN):
+
+```sh
+bun test src/__tests__/passthrough-early-stop-integration.test.ts --timeout 30000 --test-name-pattern 'JSON turn identity hides.*earlyStopEnabled":false,"missingUuid":false'
+bun test src/__tests__/passthrough-early-stop-integration.test.ts --timeout 30000 --test-name-pattern 'JSON turn identity hides.*earlyStopEnabled":true,"missingUuid":false'
+```
+
+The final four-case RED command below exits **1**, **0 pass / 4 fail**, eight
+assertions with **only server.ts from b387dc60**, final tests unchanged. The
+same command on bc7570dd also exits **1**, **0/4**, because base drops the
+second legitimate call (not because base leaks hidden content).
+
+```sh
+bun test src/__tests__/passthrough-early-stop-integration.test.ts --timeout 30000 --test-name-pattern 'JSON turn identity hides'
+```
+
+GREEN runs the four cases, five missing/empty/different-ID fail-closed controls,
+and the existing eight fragmented-refusal controls:
+
+```sh
+bun test src/__tests__/passthrough-early-stop-integration.test.ts --timeout 30000 --test-name-pattern 'JSON turn identity|fragmented refused batch'
+# exit 0: 17 pass, 0 fail, 208 assertions; 232 filtered out
+```
+
+Each new multi-turn case asserts exact ordered turn-1 IDs/inputs, tool_use stop
+reason, no hidden text/call/thinking, full canonical drain, eviction and fresh
+follow-up replay containing every real result exactly once and no refusal.
+The eight existing controls still span 2/3 calls, JSON/SSE and late metadata.
+Their standalone command with
+`--test-name-pattern 'fragmented refused batch forwards every call'` also exits
+**0**, **8 pass / 0 fail**, 124 assertions, 241 filtered out. Their fragments now explicitly share the response ID;
+digest IDs are distinct.
+The helper's Date.now-based IDs collided for distinct responses in the same
+millisecond. An initial focused run exposed 30 false same-turn fixture
+collisions (335 pass / 30 fail). The helper now gives distinct responses
+unique IDs; only intentional same-response fragments share IDs. No acceptance
+assertion was removed or weakened. The next focused run passed 365/0 before
+the seven additional missing-UUID/ID controls; final focused evidence is below.
+
+### Real CLI response IDs, including late delivery
+
+Tuple: Linux x64, Bun 1.3.14, Agent SDK 0.2.141, **Claude Code 2.1.322** at
+`/home/ras/.local/share/claude/versions/2.1.322`. Passive iterator traces through
+`scripts/e2e-offline-fresh-checkpoint.mjs` were collected before the fix with:
+
+```sh
+bun /srv/dev/ai/meridian-wt-json-forwarding/scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322 --deferred --non-stream --calls=2
+# Also --calls=3 --sse-delay-ms=25, and --calls=3 --thinking; each exit 0.
+```
+
+Two-call real iterator witness (fragment UUIDs differ):
+
+```text
+assistant id=msg_offline_1 uuid=e4afaf37-ffff-468f-add1-52f59209a726 calls=[toolu_offline]
+assistant id=msg_offline_1 uuid=13e9bbff-abce-4905-b244-b0cb3de2a001 calls=[toolu_offline_1]
+message_delta, message_stop, message_start
+assistant id=msg_offline_2 uuid=d001ee20-dc2b-416e-8691-256cb7ba2cab calls=[]
+```
+
+The paced three-call and thinking-plus-three-call runs also carry
+`msg_offline_1` through every first-response fragment, and `msg_offline_2`
+on the hidden digest. The maintained harness now asserts this same ID in real
+CLI transcript fragments and emits sanitized `FRAGMENT_IDS` on every extended
+matrix row. IDs are looked up from actual rows, not inferred from call order.
+
+A temporary iterator wrapper additionally delayed the **unchanged real CLI
+assistant objects** until immediately after their wire message_stop, using
+the same harness with `--deferred --non-stream --calls=2` and `--calls=3`.
+Both exit **0**, with exact calls, eviction and fresh real-result replay:
+
+```text
+message_delta, message_stop
+assistant id=msg_offline_1 calls=[toolu_offline]
+assistant id=msg_offline_1 calls=[toolu_offline_1]
+assistant id=msg_offline_1 calls=[toolu_offline_2]  # three-call row only
+message_start ... message_stop
+assistant id=msg_offline_2 calls=[]
+```
+
+This proves ID preservation and correct forwarding under forced late delivery,
+**not** native reachability of that ordering. Native traces delivered fragments
+before message_stop. The existing mocked lateMetadata controls also place
+refusals before the remaining metadata after message_stop. A message_stop-only
+latch would fail those controls; no latch was added. Temporary instrumentation
+and wrappers were restored byte-for-byte in finally blocks, each printing
+`IMPLEMENTATION_RESTORED True`; no SDK/CLI package was touched.
+
+### Base UUID-mapping finding
+
+Passive observation immediately after the client UUID selection block confirms
+**bc7570dd already mis-selects the hidden retry UUID in both A and B**. The same
+occurs on b387dc60. Both first-response fragments update the client slot; the
+new call in the hidden response grows expected and then overwrites that slot.
+With missing fragment UUIDs, base incorrectly selects the hidden response's
+UUID instead of keeping the client slot null. These are in-memory selection
+findings; all these multi-call requests evict, so this is not a claim that an
+unsafe mapping was durably published.
+
+The same-turn fix naturally corrects this selection without a separate UUID
+policy: final passive traces retain the last visible fragment's UUID through
+the hidden response, or null when the visible UUIDs are absent. For example:
+
+```text
+visible incoming=7b17314c-4b37-4f7e-88f0-826bbffbefac selected=7b17314c-4b37-4f7e-88f0-826bbffbefac
+hidden incoming=11e99ffa-3a8d-440c-a24d-9eebbe52dec4 selected=7b17314c-4b37-4f7e-88f0-826bbffbefac
+```
+
+The four final diagnostic cases pass (exit 0); base/b387 diagnostic runs fail
+at content equality as expected. Existing normal UUID/undo and retained
+single-call cases remain covered by the complete focused suite and matrix.
+
+### Final 21-row offline matrix and capped controls
+
+All rows below run from `/mnt/ai-scratch/meridian-json-forwarding` with this
+prefix plus only the listed flags:
+
+```sh
+bun /srv/dev/ai/meridian-wt-json-forwarding/scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322
+```
+
+**21 pass / 0 fail**, runner exit
+**0**. Every row reports `liveModelCalls:0`, exact expected client calls and
+real results upstream, no internal-error placeholder or CLI refusal, and the
+expected exact upstream request count. Unstreamed rows retain their explicit
+zero-partial-events envelope witness and pre-existing mixed-call subset.
+
+| Arguments | Exit | Upstream requests | Client calls | Checkpoint |
+|---|---:|---:|---:|---|
+| default | 0 | 2 | 1 | retained |
+| `--thinking --calls=1` | 0 | 2 | 1 | retained |
+| `--thinking --calls=3` | 0 | 2 | 3 | evicted |
+| `--mixed --calls=2` | 0 | 2 | 2 | evicted |
+| `--mixed --calls=2 --input-validation` | 0 | 2 | 2 | evicted |
+| `--deferred --calls=2` | 0 | 3 | 2 | evicted |
+| `--deferred --calls=2 --mixed --captured-last --non-stream` | 0 | 2 | 2 | evicted |
+| `--deferred --calls=1` | 0 | 3 | 1 | evicted |
+| `--deferred --calls=1 --non-stream` | 0 | 3 | 1 | evicted |
+| `--deferred --calls=1 --input-validation` | 0 | 3 | 1 | evicted |
+| `--captured --calls=1` | 0 | 2 | 1 | retained |
+| `--captured --calls=2` | 0 | 2 | 2 | evicted |
+| `--captured --calls=3` | 0 | 2 | 3 | evicted |
+| `--captured --calls=3 --sse-delay-ms=25 --distinct-tools` | 0 | 2 | 3 | evicted |
+| `--unstreamed --deferred --captured --calls=1` | 0 | 2 | 1 | retained |
+| `--unstreamed --deferred --captured --calls=2` | 0 | 2 | 2 | evicted |
+| `--unstreamed --deferred --captured --calls=3` | 0 | 2 | 3 | evicted |
+| `--unstreamed --deferred --mixed --calls=2` | 0 | 2 | 1 of 2 | evicted |
+| `--unstreamed --deferred --mixed --calls=2 --captured-last` | 0 | 2 | 1 of 2 | evicted |
+| `--deferred --non-stream --calls=2` | 0 | 3 | 2 | evicted |
+| `--deferred --non-stream --calls=3` | 0 | 3 | 3 | evicted |
+
+Additional non-deferred `--non-stream --calls=2` and `--non-stream --calls=3`
+controls each exit **1** on exact bc7570dd server.ts and on the final candidate,
+with identical **HTTP 500** / `Reached maximum number of turns (1)`. The
+existing uncaptured capped-error recovery limitation is unchanged, not fixed.
+
+### Final gates, evidence and residual boundaries
+
+```sh
+bun test src/__tests__/proxy-passthrough-deny-abort.test.ts src/__tests__/proxy-stream-deny-hold.test.ts src/__tests__/passthrough-early-stop-integration.test.ts src/__tests__/passthrough-early-stop.test.ts src/__tests__/silent-turn-recovery.test.ts --timeout 30000
+env -u TMPDIR npm test
+npm run typecheck
+npm run build
+git diff --check
+```
+
+| Gate | Exit | Concrete result |
+|---|---:|---|
+| Five focused files | 0 | 372 pass, 0 fail, 2910 assertions |
+| Full suite, 1800-second command timeout | 0 | 9099 pass, 0 fail, 28 skip, 50653 assertions across 32 isolated runs |
+| First full-suite group | 0 | 8260 pass, 0 fail, 28 skip; 8288 tests / 488 files, 548.82 s |
+| Typecheck | 0 | `tsc --noEmit`, no diagnostics |
+| Build | 0 | Node entrypoints bundled/checked; `fix-bun-exports: patched 2 file(s)`; certified local build 2 |
+| Diff whitespace | 0 | no errors |
+
+The unchanged skips are 27 unsupplied compatibility-tarball cases and one
+Windows-only PID-reuse case. Logs, exit files, passive traces, comparison
+scripts and machine-readable matrix rows are retained under
+`/mnt/ai-scratch/meridian-json-forwarding/evidence/round2/`. Non-evidence scratch
+is removed at handoff. This committed record and the maintained tests/harness
+preserve the relevant findings beyond scratch.
+
+No new cross-vendor review was available through this engineer's governed tool
+surface; no review pass is claimed. The supplied review's two predictions are
+now reproduced and covered, but independent review of this follow-up remains
+with the operator/orchestrator before any later landing. Native late-order
+reachability, live-model/client acceptance, native multi-call resume, the
+unstreamed SSE refused-call subset and capped uncaptured JSON recovery remain
+unqualified or intentionally unchanged. Missing IDs deliberately suppress later
+fragments rather than risk exposing hidden content. No merge, push, PR,
+installation, live cache mutation, deployment or service operation occurred.
+
 ## JSON refused-call forwarding (2026-11-15)
 
 **Status: fixed and locally verified on `fix/json-refused-forwarding`, based on
@@ -9,7 +273,7 @@ limits and safe controls* below (operator-approved scope, 2026-11-14). It does
 not change the multi-call replay policy or repair native multi-call resume.
 No live model calls, production/cache writes, service operations, push or PR.
 
-### Cause and retained candidate
+### Historical cause and candidate (superseded by turn identity follow-up)
 
 `src/proxy/server.ts`'s non-stream `isPassthroughTurn2` predicate (line 5414)
 counted SDK assistant **fragments** as turns. Once the first fragment supplied

@@ -233,6 +233,12 @@ try {
   if (extended) {
     const transcripts = readdirSync(root, { recursive: true }).filter(path => String(path).endsWith(".jsonl"))
     const rows = transcripts.flatMap(file => readFileSync(join(root, String(file)), "utf8").trim().split("\n").map(line => JSON.parse(line)))
+    const fragments = rows.filter(row => row.type === "assistant" &&
+      row.message?.content?.some?.(block => block.type === "tool_use" && calls.some(call => call.id === block.id)))
+    assert(fragments.length > 0, "real CLI must persist the tool-bearing assistant fragments")
+    assert(fragments.every(row => row.message.id === "msg_offline_1"), "parallel fragments must retain the upstream response id")
+    console.log("FRAGMENT_IDS " + JSON.stringify(fragments.map(row => ({ id: row.message.id,
+      calls: row.message.content.filter(block => block.type === "tool_use").map(block => block.id) }))))
     for (const [index, call] of calls.entries()) {
       const results = rows.flatMap(row => Array.isArray(row.message?.content) ? row.message.content : [])
         .filter(block => block.type === "tool_result" && block.tool_use_id === call.id)

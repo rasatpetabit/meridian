@@ -1,5 +1,107 @@
 # Mixed and multi-turn rejected checkpoint evidence
 
+## JSON forwarding rebase onto 74a5c99d (2026-11-15)
+
+**Branch-only requalification; no integration, publication, installation, service
+operation or live model call.** Rebased `fix/json-refused-forwarding` from
+`7711772b` onto `74a5c99d`. Only this document conflicted: kept the complete
+JSON sections followed by the newer mixed name-dispatch section, then the
+existing wire/cache and historical records. The inherited JSON annotations
+closing historical forwarding limitations remain intact. Other worktrees and
+branch tips were not rewritten; the parallel upstream JSON/hybrid ports overlap
+this area and remain separate work. The old branch objects remain recoverable
+by their recorded SHAs and reflog.
+
+| Before | Rebased | Subject |
+|---|---|---|
+| `731a11fa` | `e2c38a4f` | return every refused tool call in JSON responses |
+| `8bcebee8` | `ac5d18b0` | bind JSON fragments to their model response |
+| `a1053275` | `fede4004` | keep internal tool turns on the client UUID map |
+| `7711772b` | `5e7529b8` | record JSON forwarding rebase cache verification |
+
+### Interaction with 29239fcc
+
+No policy conflict was found. References below are to this rebased source:
+
+- **Non-stream path and response identity:** JSON begins at
+  `src/proxy/server.ts:4881` and returns before the SSE setup at `5957-5960`.
+  `29239fcc` creates mixed qualification only in the SSE-local checkpoint
+  freeze at `6286-6322`, not in JSON. JSON's nonempty same-response ID predicate,
+  entire-fragment suppression and visible stop reason remain at `5390-5405`,
+  `5433-5479`. Later fragments of the same model response remain visible;
+  a hidden new response remains suppressed.
+- **UUID map:** JSON still updates its assistant UUID only with no visible
+  client-forwarded call or the same response (`server.ts:5391-5405`). This
+  preserves internal StructuredOutput retry UUIDs. `29239fcc` does not edit
+  that gate. Its newly eligible SSE checkpoints indirectly use the existing
+  null-undo-UUID publication behavior (`7454-7458`, `8565-8569`), not JSON's
+  UUID map. Edited consolidated results therefore replay rather than undo
+  into a discarded fragment.
+- **Publication and refused batches:** `29239fcc` does affect SSE publication:
+  `checkpointProvenToolIds` unions separately proved name-dispatch refusals
+  with actual captures only under the explicit hybrid marker (`6286-6289`),
+  used for normal completion (`7411-7417`) and capped-error recovery
+  (`8442-8454`). Qualification needs 2–3 calls, at least one capture, one-turn
+  cap, no deferred/ToolSearch/dropped calls, exact streamed coverage and
+  strict JSON, plus id/name/declaration-matched refusals (`6298-6321`). This
+  permits qualified **mixed** batches whose CLI refused some calls; it does
+  not admit wholly refused batches. JSON publication supplies no native-call
+  marker and uses actual captures (`5833-5846`); the shared guard still
+  rejects multi-call batches without that marker and observed uncaptured
+  calls (`src/proxy/passthroughEarlyStop.ts:206-239`). JSON batches still evict
+  and replay all real results.
+- **Resume:** shared request preparation may consume a previously published
+  SSE hybrid checkpoint even when the follow-up asks for JSON. Its complete
+  result/media guards and hybrid rendering are unchanged
+  (`server.ts:3931-4003`), before response-mode dispatch at `4881`. The fixes
+  therefore share continuation infrastructure without changing each other's
+  proof domain. HTTP tests at
+  `src/__tests__/passthrough-early-stop-integration.test.ts:4490-4605` cover
+  mixed positives, null undo and replay controls; JSON identity/retry/refused
+  forwarding tests start at `4690`, `4752`, `4781`, `4836`.
+
+### Committed matrix coverage and verification receipts
+
+The dated `json21-results.json` arguments were compared with every committed
+row, ignoring flag order and runner-owned CLI/wire arguments. Nineteen were
+already covered. Added these two missing shapes to `scripts/e2e-wire-matrix.mjs`:
+
+| Label | Arguments |
+|---|---|
+| `json-deferred-refused-2` | `--deferred --non-stream --calls=2` |
+| `json-deferred-refused-3` | `--deferred --non-stream --calls=3` |
+
+The committed matrix now has **57** passing rows; the count assertion was
+updated, not removed. No R1 or harness assertion was relaxed. Existing mixed
+replay controls stay unchanged. The runner has no expected-failure facility:
+it requires exit 0 and a zero-live-call summary on every row. Therefore the
+known separate non-deferred `--non-stream --calls=2/3` capped HTTP 500 defect
+is not added as a passing row, nor disguised as a passing control. Its prior
+base comparison is recorded above; this rebase does not fix it.
+
+Before this record was committed, the focused JSON command passed **18/18**
+(215 assertions), the new mixed tests passed **15/15** (252 assertions), and
+both added real-CLI rows passed with complete ordered client call sets,
+`checkpointRetained:false`, all real results replayed and `liveModelCalls:0`.
+All bookkeeping checks use `env -u TMPDIR`; real-CLI state uses a fresh
+`/tmp/meridian-json-matrix.*` tmpfs tree, removed after passing runs, not
+virtiofs. Persistent evidence lives at
+`/mnt/ai-scratch/meridian-json-integrate/evidence/round2/`: `rebase.log`,
+`range-diff.txt`, `section-preservation.json`, `json21-coverage.json`, focused
+logs, and the two new wire captures. `verification.md` and adjacent final gate
+logs/exit receipts record the final committed head, full HTTP file,
+cache-journal test, full `npm test`, typecheck, build, diff checks and the
+complete committed wire-matrix run. No pre-rebase result is used as a
+final-head gate receipt.
+
+No new product or architecture decision. The supplied prior review remains
+applicable to the JSON implementation: the last three replayed patches are
+identical; the first differs only in document placement/base context. No new
+independent review pass is claimed on this tool surface. Branch-only scope,
+unchanged runtime patch semantics, focused interaction tests and the real-wire
+prefix/result gates bound this requalification; actual provider cache billing,
+live client/model acceptance and any integration/activation remain separate.
+
 ## JSON fragment turn identity follow-up (2026-11-15)
 
 **Status: fixed and locally verified on `fix/json-refused-forwarding`, as a

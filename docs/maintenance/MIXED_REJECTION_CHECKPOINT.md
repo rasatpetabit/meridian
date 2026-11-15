@@ -1,5 +1,242 @@
 # Mixed and multi-turn rejected checkpoint evidence
 
+## Wire result-shape gate: errors, images, ordering and incomplete results
+
+**Current policy refinement (CLI 2.1.322 / SDK 0.2.141); supersedes the broad
+hybrid-media qualification below.** Based on `c2b7a0a1`, still on
+`fix/multicall-resume-cache`. Error-first/error-later, reversed results and
+native call-1 images retain the checkpoint. **Any image in a non-native
+result now takes the existing fresh-replay fallback.** No API or store-schema
+change. No push, merge, installation, service signal/restart, production-store
+access or live model call. The main checkout and `fix/json-refused-forwarding`
+are untouched. That branch still overlaps this harness/HTTP suite/server and
+must be reconciled separately, not overwritten.
+
+### Failure, isolation and fail-closed correction
+
+The first 46-row run had **44 pass / 2 fail**. Both failures were three-call
+`--result-kind=image-later`, with and without `--follow-on --thinking`:
+
+```text
+PASS R1: system, tools and messages retain the complete upstream prefix
+AssertionError: completed-call record must preserve replay-rendered result/error/media exactly once for toolu_offline_2
+0 !== 1
+```
+
+The client gave call 2 a `[text, image]` array; call 3 had the ordinary string
+`REAL_CLIENT_RESULT[toolu_offline_2]`. The wire contains that final text with
+an **added newline**, then a new text block:
+
+```text
+REAL_CLIENT_RESULT[toolu_offline_2]\n
+[Image: source: /tmp/claude-1000/<disposable-session>/images/1.png]
+```
+
+This is not a missing text occurrence or initial-prefix failure: R1 passes,
+but exact completed-record fidelity fails. No assertion was relaxed to strip
+newlines or image-source annotations. Two-call image-later passed initially.
+An isolated control moving only the three-call image from call 2 to final
+call 3 also passed every R1/fidelity/follow-on check (exit 0,
+`liveModelCalls:0`). The renderer's plain-string result remains unchanged;
+CLI 2.1.322's top-level image annotation changes the trailing text when an
+image precedes it. The PNG in the final matrix is a valid 1x1 RGBA PNG with
+verified chunk CRCs; it is compared structurally, including base64 bytes.
+
+`src/proxy/replay.ts:247` now rejects images in non-native result arrays by
+returning `undefined`; `server.ts:3998` labels that existing replay path
+`hybrid_result_shape_unproved`. All later-result images are conservatively
+unqualified, including image-last/two-call cases that happened to pass, so
+eligibility cannot depend on subsequent call records or queued user text.
+Native result images stay wrapped and wire-proven; text/error records and
+reversed order are unchanged. `src/proxy/SPEC.md` owns this boundary/rationale.
+No attempt is made here to alter the CLI's serializer or invent a new format.
+
+Four new HTTP-seam cases (`passthrough-early-stop-integration.test.ts:4556`)
+create real streamed checkpoint mappings before supplying images: two-/three-
+call non-native image cases replay without resume options and preserve each
+result/image once; corresponding native-image controls resume the first UUID.
+Before the guard: **exit 1, 2 pass / 2 fail**, expected `resume: undefined`,
+received the original session. After: **exit 0, 4 pass / 0 fail**, 58 assertions.
+The pure helper suite also tests rejecting a later image in either record slot.
+
+The incomplete-result policy was read from both `bc7570dd:src/proxy/server.ts`
+and current `src/proxy/SPEC.md`: keyed incomplete/mismatched results replay,
+never synthesize a missing result. For `missing-later`, only call 1's result
+is supplied in each two-call turn; every supplied result occurs once, and
+neither result text nor a result record for call 2 is fabricated. No prefix
+claim is made for an incomplete turn. The optional final single-call complete
+turn still resumes and passes R1.
+
+### Final wire matrix: 46 pass, 0 fail, all liveModelCalls 0
+
+All rows ran offline using the real production-version CLI, Bun 1.3.14,
+Linux x64 and loopback scripted upstream. The shared command recipe is:
+
+```sh
+CLI=/home/ras/.local/share/claude/versions/2.1.322
+E=/mnt/ai-scratch/meridian-multicall-cache
+export MERIDIAN_E2E_SCRATCH="$E"
+bun scripts/e2e-offline-fresh-checkpoint.mjs --claude="$CLI" <arguments> --wire="$E/shapes-<row>-wire.json"
+```
+
+`row` below identifies the exact `shapes-<row>-wire.json` capture and
+`shapes-<row>.log`. `shapes-results.json` contains the full argv, exit,
+`liveModelCalls` and every PASS line per row; `shapes-matrix.log` is the runner
+output. Original commands are taken unchanged (except separate evidence
+filenames) from `matrix-results.json`, not reconstructed from a summary.
+
+Receipt abbreviations below quote the decisive emitted PASS lines:
+
+- **L**: `PASS lineage: exact streamed assistant plus client results is continuation`
+- **R1**: `PASS R1: system, tools and messages retain the complete upstream prefix`
+- **F(kind)**: `PASS result fidelity: native call-1 structurally equals client result; later records equal replay renderer (kind)`
+- **H**: `PASS hybrid continuation: first native result plus completed-call records; every real result exactly once`
+- **N**: `PASS continuation: native assistant and real client result for every call; rejection rewound`
+- **O(n)**: `PASS follow-on R1/R2: settled n calls; existing prefix unchanged; every real result exactly once`
+- **P**: `PASS follow-up: fresh replay, not a resumed continuation; every supplied real client result; no CLI rejection`
+- **I**: `PASS replay control: non-native image fails closed; real results exactly once; renderer attribution and image preserved; no prefix claim`
+- **OI**: `PASS follow-on replay control: non-native image; fresh replay; real results exactly once; attribution/image preserved; no prefix claim`
+- **M**: `PASS incomplete results: fresh replay; supplied result exactly once; no fabricated missing result; no prefix claim`
+- **OM**: `PASS follow-on incomplete results: fresh replay; supplied results exactly once; nothing fabricated; no prefix claim`
+- **C**: `PASS fresh: CLI rejected bare read before PreToolUse; canonical transcript and checkpoint exist`
+- **E**: `PASS fresh: CLI rejected 3 bare reads before PreToolUse; mapping evicted`
+
+Fidelity expectations call `flattenAssistantContent` and
+`normalizeStructuredUserContent`, independently of the hybrid helper. Native
+results are deep-compared without cache markers (no string/array conversion
+for this check). R1 uses the **unchanged** existing `stripCache`; follow-on R1
+compares against the immediately previous entire upstream request, including
+prior native image/error results. Exact-once result checks include all earlier
+turns. Mapping/call-ID/native-ID and telemetry resume/replay checks remain
+active. Image-later controls check renderer attribution and exact image bytes,
+not a cache-prefix property. Results are changed only in client tool_result
+blocks, including later follow-on turns; the scripted upstream is unchanged.
+
+| Row | Arguments | Exit | PASS receipts |
+|---|---|---:|---|
+| error-first-2 | `--captured --calls=2 --result-kind=error-first` | 0 | L, R1, F(error-first), H |
+| error-first-2-follow | `--captured --calls=2 --result-kind=error-first --follow-on` | 0 | L, R1, F(error-first), H, F(error-first), O(2), F(error-first), O(1) |
+| error-first-3 | `--captured --calls=3 --result-kind=error-first` | 0 | L, R1, F(error-first), H |
+| error-first-3-follow | `--captured --calls=3 --result-kind=error-first --follow-on --thinking` | 0 | L, R1, F(error-first), H, F(error-first), O(3), F(error-first), O(1) |
+| error-later-2 | `--captured --calls=2 --result-kind=error-later` | 0 | L, R1, F(error-later), H |
+| error-later-2-follow | `--captured --calls=2 --result-kind=error-later --follow-on` | 0 | L, R1, F(error-later), H, F(error-later), O(2), F(error-later), O(1) |
+| error-later-3 | `--captured --calls=3 --result-kind=error-later` | 0 | L, R1, F(error-later), H |
+| error-later-3-follow | `--captured --calls=3 --result-kind=error-later --follow-on --thinking` | 0 | L, R1, F(error-later), H, F(error-later), O(3), F(error-later), O(1) |
+| image-first-2 | `--captured --calls=2 --result-kind=image-first` | 0 | L, R1, F(image-first), H |
+| image-first-2-follow | `--captured --calls=2 --result-kind=image-first --follow-on` | 0 | L, R1, F(image-first), H, F(image-first), O(2), F(image-first), O(1) |
+| image-first-3 | `--captured --calls=3 --result-kind=image-first` | 0 | L, R1, F(image-first), H |
+| image-first-3-follow | `--captured --calls=3 --result-kind=image-first --follow-on --thinking` | 0 | L, R1, F(image-first), H, F(image-first), O(3), F(image-first), O(1) |
+| image-later-2 | `--captured --calls=2 --result-kind=image-later` | 0 | L, I, P |
+| image-later-2-follow | `--captured --calls=2 --result-kind=image-later --follow-on` | 0 | L, I, P, OI, F(image-later), O(1) |
+| image-later-3 | `--captured --calls=3 --result-kind=image-later` | 0 | L, I, P |
+| image-later-3-follow | `--captured --calls=3 --result-kind=image-later --follow-on --thinking` | 0 | L, I, P, OI, F(image-later), O(1) |
+| reversed-2 | `--captured --calls=2 --result-kind=reversed` | 0 | L, R1, F(reversed), H |
+| reversed-2-follow | `--captured --calls=2 --result-kind=reversed --follow-on` | 0 | L, R1, F(reversed), H, F(reversed), O(2), F(reversed), O(1) |
+| reversed-3 | `--captured --calls=3 --result-kind=reversed` | 0 | L, R1, F(reversed), H |
+| reversed-3-follow | `--captured --calls=3 --result-kind=reversed --follow-on --thinking` | 0 | L, R1, F(reversed), H, F(reversed), O(3), F(reversed), O(1) |
+| missing-later-2 | `--captured --calls=2 --result-kind=missing-later` | 0 | L, M, P |
+| missing-later-2-follow | `--captured --calls=2 --result-kind=missing-later --follow-on` | 0 | L, M, P, OM, F(missing-later), O(1) |
+| original-01 | `(default)` | 0 | C, L, R1, F(text), N |
+| original-02 | `--thinking --calls=1` | 0 | C, L, R1, F(text), N |
+| original-03 | `--thinking --calls=3` | 0 | E, P |
+| original-04 | `--mixed --calls=2` | 0 | P |
+| original-05 | `--mixed --calls=2 --input-validation` | 0 | P |
+| original-06 | `--deferred --calls=2` | 0 | P |
+| original-07 | `--deferred --calls=2 --mixed --captured-last --non-stream` | 0 | P |
+| original-08 | `--deferred --calls=1` | 0 | P |
+| original-09 | `--deferred --calls=1 --non-stream` | 0 | P |
+| original-10 | `--deferred --calls=1 --input-validation` | 0 | P |
+| original-11 | `--captured --calls=1` | 0 | L, R1, F(text), N |
+| original-12 | `--captured --calls=2` | 0 | L, R1, F(text), H |
+| original-13 | `--captured --calls=3` | 0 | L, R1, F(text), H |
+| original-14 | `--captured --calls=3 --sse-delay-ms=25 --distinct-tools` | 0 | L, R1, F(text), H |
+| original-15 | `--unstreamed --deferred --captured --calls=1` | 0 | L, R1, F(text), N |
+| original-16 | `--unstreamed --deferred --captured --calls=2` | 0 | P |
+| original-17 | `--unstreamed --deferred --captured --calls=3` | 0 | P |
+| original-18 | `--unstreamed --deferred --mixed --calls=2` | 0 | P |
+| original-19 | `--unstreamed --deferred --mixed --calls=2 --captured-last` | 0 | P |
+| original-20 | `--captured --calls=2 --non-stream` | 0 | P |
+| original-21 | `--captured --calls=3 --non-stream` | 0 | P |
+| original-22 | `--captured --calls=2 --deferred` | 0 | L, R1, F(text), H |
+| original-23 | `--captured --calls=3 --thinking --follow-on` | 0 | L, R1, F(text), H, F(text), O(3), F(text), O(1) |
+| original-24 | `--captured --calls=2 --follow-on` | 0 | L, R1, F(text), H, F(text), O(2), F(text), O(1) |
+
+### Local verification and environment correction
+
+All final source checks ran foreground, without skipping hooks:
+
+| Command | Exit | Result |
+|---|---:|---|
+| `bun test src/__tests__/passthrough-early-stop-integration.test.ts` | 0 | 238 pass, 0 fail, 2512 assertions |
+| `bun test src/__tests__/hybrid-tool-result-continuation.test.ts` | 0 | 6 pass, 0 fail, 26 assertions |
+| `bun test src/__tests__/bookkeeping-store-contract.test.ts` | 0 | 8 pass, 0 fail, 66 assertions |
+| `bun test src/__tests__/proxy-stream-deny-hold.test.ts` | 0 | 4 pass, 0 fail, 26 assertions |
+| `npm run typecheck` | 0 | `tsc --noEmit` |
+| `npm run build` | 0 | Certified local build 4 (`4d1717f7-ae96-40e3-a7a7-11a57de51dfb`); no installation |
+| `npm test` | 0 | 9096 pass, 28 skip, 0 fail across isolated commands; foreground 1800-second timeout |
+| `git diff --check` | 0 | No whitespace errors |
+
+The full suite's bulk phase was 8266 pass / 28 skip / 0 fail, 489 files,
+538.60 s; the HTTP phase was 238 pass / 0 fail. Skips remain the existing
+unavailable `BOOKKEEPING_COMPAT_TARBALL` cases, not new exclusions.
+
+The first focused run (store: exit 1, 1 pass / 7 fail) and first full run
+(exit 1, 7390 pass / 28 skip / 876 fail / 1 error) put `TMPDIR` directly on
+scratch's **virtiofs**. The decisive error was:
+
+```text
+unsupported bookkeeping filesystem linux/1702057286; operator may explicitly set BOOKKEEPING_ALLOW_UNVERIFIED_FS=1
+```
+
+No override was set and no filesystem guard was changed. Unprivileged user-
+namespace mounting was unavailable (`uid_map: Operation not permitted`), so
+only a disposable **768 MiB tmpfs** was mounted at `$E/test-tmp` using available
+`sudo -n`, with uid/gid 1000 and mode 0700. All four focused suites, typecheck,
+build and full npm test then ran with `TMPDIR=$E/test-tmp`; the shell's EXIT
+trap unmounted it. A final `findmnt -T` shows the original virtiofs again and
+no remaining test data. No production state or persistent machine-wide mount
+was changed. Final inspection also found the CLI's image-only temp files
+under `/tmp/claude-1000` in early probes (the original harness did not pin
+`TMPDIR`). The harness now sets `TMPDIR` to its disposable scratch root, and
+**all 46 rows were rerun successfully after that change**. Only task-witnessed
+temp directories containing this PNG fixture were removed; no such directories
+remain. Final harness scratch and test paths stay under the specified root.
+Supported-FS logs are `shapes-supported-<suite>.log`,
+`shapes-supported-typecheck.log`, `shapes-supported-build.log`, and
+`shapes-supported-npm-test.log`. Typecheck and build were repeated after the
+harness-only TMPDIR correction: `shapes-final-typecheck.log` and
+`shapes-final-build.log` (both exit 0); `node --check` on the harness also
+exited 0. Full-suite evidence remains source-bound to the identical runtime
+code and unit/HTTP tests. Earlier failures remain separately recorded in
+`shapes-<suite>.log` and `shapes-npm-test.log`.
+
+RED wire artifacts are `shapes-image-later-3-red.log`,
+`shapes-image-later-3-red-wire.json`, and corresponding `-3-follow-red` files;
+`shapes-red-results.json` preserves the first matrix. Isolation command:
+
+```sh
+bun "$E/image-last-control.mjs" --source-root=/srv/dev/ai/meridian-wt-multicall-cache --claude="$CLI" --captured --calls=3 --result-kind=image-later --follow-on --thinking --wire="$E/image-last-control-wire.json"
+```
+
+The scratch control differs only in selecting the last rather than second
+result for the image. `image-last-control.log` records its pre-guard success.
+HTTP red/green logs: `shapes-http-red.log`, `shapes-http-green.log`. Earlier
+harness-development probes corrected a shell-interpolated expectation and an
+invalid sample PNG CRC before the recorded matrices; neither is treated as a
+production defect or final pass.
+
+Adversarial self-check covered strict text preservation, structural native
+payloads, independent renderer expectations, earlier-turn image/error prefix
+retention, reversed identity matching, missing-result non-fabrication,
+fail-closed controls and native-image negative controls. No new architecture
+or product decision was needed: fallback implements the operator's explicit
+instruction for unproved shapes. Independent cross-vendor review is not
+claimed on this bounded tool surface (no governed subagent/advisor tool).
+The existing accepted review is not represented as reviewing this new guard;
+the parent owns review/CI/integration/activation. `uam_status` was attempted
+and is unavailable (`command not found`); live writer locations and clean
+worktree metadata are not a fleet-wide all-clear.
+
 ## Cache-prefix regression: first-fragment hybrid continuation (2026-11-14 incident)
 
 **Current policy; supersedes the all-multi-call replay conclusions below only

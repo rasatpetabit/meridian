@@ -10,6 +10,8 @@ reproduced through the real HTTP handler with the mocked SDK, not accepted
 from code inspection alone. Production, other worktrees, installed packages,
 live cache and services were not modified or signalled. No live model calls.
 
+**2026-11-15:** Internal StructuredOutput retries are not client calls: content and stop_reason stay on the response-id gate, and the client UUID map updates whenever no client-forwarded call is visible, so a schema-validation retry records the successful attempt.
+
 ### Reproduced cause and same-turn rule
 
 Tracker growth cannot prove model-turn membership. With early stop disabled,

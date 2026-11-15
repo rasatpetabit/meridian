@@ -139,16 +139,21 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   ID. A growing tracker is not proof of same-model-turn membership. Missing,
   empty or different response IDs fail closed: suppress the entire later
   fragment, including text, thinking and new tool calls. Use the same rule for
-  the client assistant UUID and visible stop reason, independently of early-stop
-  settlement, its kill switch, SDK fragment UUIDs and wire-boundary timing.
+  the visible stop reason. Update the client assistant UUID on that same
+  response only when a client-forwarded call is already visible; an internal
+  tool such as StructuredOutput does not count, so a schema-validation retry
+  with a new response ID still records its own assistant UUID. Both stay
+  independent of early-stop settlement, its kill switch, SDK fragment UUIDs
+  and wire-boundary timing.
   On normal JSON completion, forward every same-turn refused call with its
   original ID, input and order, and `stop_reason: "tool_use"`, matching SSE
   delivery, even when metadata follows message_stop. Drain the hidden second
-  turn without exposing its content or replacing the visible stop reason or
-  assistant UUID. Multi-call mappings still evict and the next request replays
-  every real client result; this changes neither SSE behavior nor checkpoint
-  eligibility. The separate JSON `error_max_turns` recovery limit remains
-  outside this normal-completion fix. See the dated JSON forwarding evidence in
+  turn of a client-forwarded batch without exposing its content or replacing
+  the visible stop reason or assistant UUID. Multi-call mappings still evict
+  and the next request replays every real client result; this changes neither
+  SSE behavior nor checkpoint eligibility. The separate JSON
+  `error_max_turns` recovery limit remains outside this normal-completion fix.
+  See the dated JSON forwarding evidence in
   `docs/maintenance/MIXED_REJECTION_CHECKPOINT.md`.
 - **A canonical single-turn name-dispatch refusal can retain a keyed tool
   checkpoint without PreToolUse capture.** The CLI can reject a bare client

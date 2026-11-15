@@ -5388,12 +5388,14 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 if (!sawTurnBoundarySignal) releaseHeldDenies("assistant_message")
                 assistantMessages += 1
                 const hasVisibleToolUse = passthrough && contentBlocks.some(b => b.type === "tool_use")
+                const hasVisibleClientCall = passthrough && contentBlocks.some(b =>
+                  isClientForwardedToolUse(b, clientToolPrefix, clientToolSearch))
                 const messageId = message.message.id
-                const isPassthroughTurn2 = hasVisibleToolUse && !(
+                const samePassthroughToolResponse =
                   typeof messageId === "string" && messageId.length > 0 &&
                   messageId === passthroughToolTurnMessageId
-                )
-                if (!isPassthroughTurn2) {
+                const isPassthroughTurn2 = hasVisibleToolUse && !samePassthroughToolResponse
+                if (!hasVisibleClientCall || samePassthroughToolResponse) {
                   sdkUuidMap = withClientAssistantUuid(
                     sdkUuidMap,
                     allMessages.length,

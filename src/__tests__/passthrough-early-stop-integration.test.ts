@@ -4778,6 +4778,60 @@ describe("Integration: passthrough early stop", () => {
     })
   }
 
+  it("JSON structured-output retry records the successful internal attempt UUID", async () => {
+    const sessionKey = `json-structured-retry-${TEST_RUN_ID}`
+    usedSessionKeys.add(sessionKey)
+    const headers = { "x-meridian-agent": "pi", "user-agent": "pi/1.4.0", "x-session-affinity": sessionKey }
+    const rejectedUuid = "11111111-1111-4111-8111-111111111111"
+    const acceptedUuid = "22222222-2222-4222-8222-222222222222"
+    const rejected = assistantMessage([
+      { type: "tool_use", id: "structured-rejected", name: "StructuredOutput", input: { answer: 1 } },
+    ])
+    rejected.message.id = "msg_A"
+    rejected.uuid = rejectedUuid
+    const accepted = assistantMessage([
+      { type: "tool_use", id: "structured-accepted", name: "StructuredOutput", input: { answer: "ok" } },
+    ])
+    accepted.message.id = "msg_B"
+    accepted.uuid = acceptedUuid
+    const schema = {
+      type: "object",
+      properties: { answer: { type: "string" } },
+      required: ["answer"],
+      additionalProperties: false,
+    }
+    mockMessages = [
+      { ...rejected, test_skip_pre_tool_hook: true },
+      {
+        type: "user",
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "structured-rejected",
+            content: "Output does not match the required schema", is_error: true }],
+        },
+        parent_tool_use_id: null,
+        uuid: crypto.randomUUID(),
+        session_id: "test-session",
+      },
+      { ...accepted, test_skip_pre_tool_hook: true },
+      { type: "result", subtype: "success", is_error: false, structured_output: { answer: "ok" } },
+    ]
+    const response = await post(app, {
+      model: "opus[1m]", max_tokens: 400, stream: false,
+      messages: [{ role: "user", content: "Return an answer." }],
+      output_config: { format: { type: "json_schema", schema } },
+    }, "unused", headers)
+    const body = await response.json()
+    expect(response.status).toBe(200)
+    expect(body.content).toEqual([{ type: "text", text: '{"answer":"ok"}' }])
+    expect(body.stop_reason).toBe("end_turn")
+    expect(JSON.stringify(body)).not.toContain("structured-rejected")
+    expect(JSON.stringify(body)).not.toContain("structured-accepted")
+    const stored = lookupSharedSession(sessionKey)
+    expect(stored?.sdkMessageUuids?.at(-1)).toBe(acceptedUuid)
+    expect(stored?.sdkMessageUuids).not.toContain(rejectedUuid)
+  })
+
   for (const stream of [false, true]) for (const count of [2, 3]) for (const lateMetadata of [false, true]) {
     it(`fragmented refused batch forwards every call (${JSON.stringify({ stream, count, lateMetadata })})`, async () => {
       const sessionKey = `fragmented-refused-${stream}-${count}-${lateMetadata}-${TEST_RUN_ID}`

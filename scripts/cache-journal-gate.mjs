@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url"
 import { resolve } from "node:path"
 
 const REQUEST = /^\[PROXY\] (\S+) adapter=\S+ .*?lineage=(\S+).*?msgs=(.*)$/
-const USAGE = /^\[PROXY\] (\S+) usage: .*?cache_read=(\S+) cache_write=(\S+)/
+// Meridian omits cache_read= when nothing was read.
+const USAGE = /^\[PROXY\] (\S+) usage: .*?(?:cache_read=(\S+) )?cache_write=(\S+)/
 const TOKEN = /^([0-9.]+)([kM]?)$/
 const WRITE_THRESHOLD = 100_000
 const HELP = `Usage: bun scripts/cache-journal-gate.mjs (--since <time> [--until <time>] | --file=<path>)
@@ -79,7 +80,7 @@ export function summarizeJournal(text) {
     }
     const usage = USAGE.exec(line)
     if (usage) {
-      reads.set(usage[1], parseTokenCount(usage[2]))
+      reads.set(usage[1], usage[2] === undefined ? 0 : parseTokenCount(usage[2]))
       writes.set(usage[1], parseTokenCount(usage[3]))
       continue
     }

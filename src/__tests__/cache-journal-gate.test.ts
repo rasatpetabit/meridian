@@ -51,6 +51,22 @@ describe("parseTokenCount", () => {
   })
 })
 
+describe("summarizeJournal usage without cache_read", () => {
+  // Meridian omits cache_read= when nothing was read; a full cold rewrite looks like this.
+  const cold = [
+    "[PROXY] req-cold adapter=pi profile=fixture model=fake stream=true tools=2 lineage=new session=new sdkActive=0/1 sdkQueued=0 sessionWait=1ms msgCount=58 msgs=user[text] → user[tool_result]",
+    "[PROXY] req-cold usage: input=2 output=717 cache_write=182k cache=0%",
+  ].join("\n")
+
+  it("counts the write and treats the missing read as zero", () => {
+    const report = summarizeJournal(cold)
+    expect(report.requests).toBe(1)
+    expect(report.writes_ge_100k).toBe(1)
+    expect(report.write_tokens_ge_100k).toBe(182_000)
+    expect(report.cache_read_fraction).toBe(0)
+  })
+})
+
 describe("summarizeJournal", () => {
   const report = summarizeJournal(journal)
 

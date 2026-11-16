@@ -158,11 +158,17 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   resolved names. Every wire record must be naturally closed and complete;
   duplicate starts/IDs, unsurfaced wire blocks, visible calls without records
   and extra rejections fail closed. Each visible object input must deep-equal
-  strict `JSON.parse(record.json)`; unparseable or divergent metadata cannot
+  strict `JSON.parse(record.json)` when that wire string is non-empty, and
+  otherwise the inline input object from `content_block_start`. An empty wire
+  string with no inline object, unparseable JSON, or any other mismatch cannot
   authorize a call SSE did not prove. Reuse the SSE uncaptured recovery veto
-  with the wire-start count and its input-completeness check. Reset wire and
-  rejection proof at every SDK attempt, including fresh resume/model fallback,
-  and read the actual constructed attempt's budget. The pre-existing JSON
+  with the wire-start count and its input-completeness check. The proof keeps
+  its own attempt-scoped set of wire-started client tool ids, reset with the
+  other wire and rejection proof at every SDK attempt, including fresh
+  resume/model fallback. That reset does not clear or refill the pre-existing
+  `streamedToolUseIds` completeness oracle; early-stop coverage and checkpoint
+  publication keep using it as before this proof. Read the actual constructed
+  attempt's budget. The pre-existing JSON
   assembly loop can retain error-assistant content across a retry: if any
   content survives into a later attempt, veto this new recovery, without
   changing the retry/assembly loop. Cancellation, revoked writes, duplicate or
@@ -172,9 +178,16 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   error recovery. As in SSE, a fully rejected undeclared name is delivered as
   written for the client's invalid-tool result: rejection proves it ran nowhere;
   declaration is required only without that proof. The response-identity gate
-  above remains authoritative for content; hidden fragments never join the
-  recovered JSON batch. Invalidate the exact-generation mapping before releasing
-  recovered calls, and fail closed on an eviction conflict. JSON publishes no
+  above remains authoritative for content. Hidden-response fragments never join
+  the recovered JSON batch, and a client tool block started in any response
+  other than the delivered one makes capped JSON recovery fail closed (the
+  pre-existing HTTP 500): at the single-turn cap the CLI makes one upstream
+  model call. On Claude Code 2.1.322, the captures
+  `/mnt/ai-scratch/meridian-json-capped-500/evidence/round2/cli-2-wire.json` and
+  `cli-3-wire.json` each hold exactly two upstream requests, the capped turn and
+  the follow-up carrying the real tool results. Invalidate the exact-generation
+  mapping before releasing recovered calls, and fail closed on an eviction
+  conflict. JSON publishes no
   native-call marker and supplies no capture proof for rejected calls, including
   a single call, so its existing publication guard cannot retain these mappings.
   Follow-up real results therefore replay fresh, each exactly once.

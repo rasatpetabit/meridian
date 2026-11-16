@@ -5173,6 +5173,52 @@ describe("Integration: passthrough early stop", () => {
     })
   })
 
+  describe("JSON capped proof round3", () => {
+    const cappedError = () => new Error("Claude Code returned an error result: Reached maximum number of turns (1)")
+    const request = () => post(app, { model: "claude-sonnet-4-5", max_tokens: 400, stream: false,
+      tools: [READ_TOOL], messages: [{ role: "user", content: "prove inline input" }] })
+
+    it("recovers a refused batch whose starts carry inline {} and no input_json_delta", async () => {
+      const calls = [0, 1].map(index => ({ type: "tool_use", id: `inline-${index}`, name: "read", input: {} }))
+      const assistant = assistantMessage(calls)
+      assistant.message.id = "msg_inline_empty"
+      mockMessages = [messageStart("msg_inline_empty"),
+        ...calls.flatMap((call, index) => [toolUseBlockStart(index, call.name, call.id), blockStop(index)]),
+        messageDelta("tool_use"), messageStop(),
+        { ...assistant, test_skip_pre_tool_hook: true },
+        ...calls.map(call => unavailableToolMessage(call.id, call.name)),
+        { type: "result", subtype: "error_max_turns", is_error: true },
+      ]
+      mockTerminalError = cappedError()
+      const response = await request()
+      const body = await response.json()
+      expect(response.status).toBe(200)
+      expect(body.stop_reason).toBe("tool_use")
+      expect(body.content).toEqual(calls)
+    })
+
+    it("fails closed when the inline start object differs from the assistant input", async () => {
+      const delivered = { type: "tool_use", id: "inline-mismatch", name: "read", input: { file_path: "/not-inline" } }
+      const assistant = assistantMessage([delivered])
+      assistant.message.id = "msg_inline_mismatch"
+      mockMessages = [messageStart("msg_inline_mismatch"),
+        streamEvent({ type: "content_block_start", index: 0, content_block: {
+          type: "tool_use", id: delivered.id, name: delivered.name, input: { file_path: "/inline" },
+        } }),
+        blockStop(0), messageDelta("tool_use"), messageStop(),
+        { ...assistant, test_skip_pre_tool_hook: true },
+        unavailableToolMessage(delivered.id, delivered.name),
+        { type: "result", subtype: "error_max_turns", is_error: true },
+      ]
+      mockTerminalError = cappedError()
+      const response = await request()
+      const body = await response.json()
+      expect(response.status).toBe(500)
+      expect(body.type).toBe("error")
+      expect(body.content).toBeUndefined()
+    })
+  })
+
   // Uncaptured calls must fail closed regardless of the CLI refusal wording.
   for (const shape of [
     { stream: true, deferred: false, mixed: true, inputRejected: true, single: false },

@@ -4922,6 +4922,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
           const toolBlockRecords = new Map<string, StreamedToolBlockRecord>()
           const activeToolBlocks = new Map<number, StreamedToolBlockRecord>()
           let wireToolBlockStarts = 0
+          const wireToolUseIds = new Set<string>()
           let contentFromEarlierAttempt = false
           let lastAttemptMaxTurns: number | undefined
           let nextPassthroughToolCallAssistantUuid: string | undefined
@@ -4957,7 +4958,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
             toolBlockRecords.clear()
             rejectedToolNames.clear()
             activeToolBlocks.clear()
-            streamedToolUseIds.clear()
+            wireToolUseIds.clear()
             wireToolBlockStarts = 0
             lastAttemptMaxTurns = attemptQuery.options.maxTurns
             yield* runSdkQueryAttempt(attemptQuery, requestAbort.controller.signal, requestMeta, mode, managedSdkAttemptLocators())
@@ -5397,15 +5398,20 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                   if (eventType === "message_start") activeToolBlocks.clear()
                   if (eventType === "content_block_start" && isClientForwardedToolUse(event.content_block, clientToolPrefix, clientToolSearch)) {
                     const block = event.content_block
+                    const inlineInput = block.input !== null && typeof block.input === "object" && !Array.isArray(block.input)
+                      ? block.input
+                      : undefined
                     const record: StreamedToolBlockRecord = {
                       id: block.id,
                       name: resolveClientToolName(block.name, passthroughMcp?.clientNameByAlias, passthroughMcpName),
                       json: "",
-                      startedInputObject: block.input !== null && typeof block.input === "object" && !Array.isArray(block.input),
+                      startedInputObject: inlineInput !== undefined,
+                      inlineInput,
                       forwardedStart: true,
                       naturalStop: false,
                     }
                     wireToolBlockStarts++
+                    wireToolUseIds.add(block.id)
                     activeToolBlocks.set(event.index, record)
                     toolBlockRecords.set(block.id, record)
                   } else if (eventType === "content_block_delta" && event.delta?.type === "input_json_delta" &&
@@ -5630,12 +5636,12 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
             const confirmedToolUnavailable = env("PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY") !== "0" &&
               !contentFromEarlierAttempt && wireToolBlockStarts > 0 &&
               wireToolBlockStarts === toolBlockRecords.size &&
-              toolBlockRecords.size === streamedToolUseIds.size &&
+              toolBlockRecords.size === wireToolUseIds.size &&
               toolBlockRecords.size === rejectedToolNames.size &&
               toolBlockRecords.size === visibleCalls.length &&
               new Set(visibleCalls.map(block => block.id)).size === visibleCalls.length &&
               [...toolBlockRecords.values()].every(record =>
-                streamedToolUseIds.has(record.id) && rejectedToolNames.get(record.id) === record.name &&
+                wireToolUseIds.has(record.id) && rejectedToolNames.get(record.id) === record.name &&
                 streamedToolBlockVeto(record) === undefined) &&
               visibleCalls.every(block => {
                 if (typeof block.id !== "string" || typeof block.name !== "string" ||
@@ -5643,7 +5649,8 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 const record = toolBlockRecords.get(block.id)
                 if (!record || record.name !== block.name) return false
                 try {
-                  return isDeepStrictEqual(block.input, JSON.parse(record.json))
+                  const proved = record.json.length > 0 ? JSON.parse(record.json) : record.inlineInput
+                  return proved !== undefined && isDeepStrictEqual(block.input, proved)
                 } catch {
                   return false
                 }

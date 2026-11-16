@@ -809,10 +809,12 @@ export function canRecoverCapturedToolUses(input: {
 export interface StreamedToolBlockRecord {
   id: string
   name: string
-  /** Accumulated input_json_delta partials (plus any inline start input). */
+  /** Accumulated input_json_delta partials. Empty when none arrived. */
   json: string
   /** True when the block carried an inline input object at start (no deltas). */
   startedInputObject: boolean
+  /** That start object, when it was a non-array object. Absent on records that never stored one. */
+  inlineInput?: unknown
   forwardedStart: boolean
   naturalStop: boolean
 }

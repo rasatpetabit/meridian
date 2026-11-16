@@ -1,5 +1,73 @@
 # Mixed and multi-turn rejected checkpoint evidence
 
+## Capped JSON review round 3 (2026-11-15)
+
+Follow-up to `aadfb8ef` on `fix/json-capped-refused-500`, confined to the same
+worktree. The owner settled three cross-vendor findings. This does not broaden
+SSE, checkpoint retention, abort-window recovery or larger-budget recovery, and
+it does not push, merge, pack, install, restart a service or call a live model.
+
+- **Proof ids stay off the completeness oracle.** `runNonStreamSdkAttempt` no
+  longer clears `streamedToolUseIds`. Early-stop coverage
+  (`trackerCoversStreamedCalls`) and checkpoint publication
+  (`observedToolCallIds`) keep that set's `9434c189` clear and fill behavior.
+  Capped JSON recovery compares its own attempt-scoped `wireToolUseIds` set,
+  cleared with the other proof state and filled where `wireToolBlockStarts` is
+  counted.
+- **Inline start input.** A naturally closed block whose wire string is empty
+  is still complete when `content_block_start` carried an input object. The
+  delivered object deep-equals strict `JSON.parse(record.json)` when that
+  string is non-empty, and otherwise the inline object stored on the record.
+  No inline object, unparseable JSON, or any other mismatch fails closed.
+- **Hidden response.** Hidden-response fragments never join the recovered JSON
+  batch. A client tool block started in any response other than the delivered
+  one makes capped JSON recovery fail closed (the pre-existing HTTP 500),
+  because at the single-turn cap the CLI makes one upstream model call. On
+  Claude Code 2.1.322, `cli-2-wire.json` and `cli-3-wire.json` under
+  `/mnt/ai-scratch/meridian-json-capped-500/evidence/round2/` each hold exactly
+  two upstream requests: the capped turn, then the follow-up carrying the real
+  tool results.
+
+`aadfb8ef` is the owner's decision that changed the hidden-response
+expectation. On that head the early-stop file is **309 pass / 0 fail**
+(`evidence/round2/conductor-integration.log`) and `env -u TMPDIR npm test`
+exits **0** (`conductor-npm-test.exit`; summed from that log: **9176 pass /
+0 fail / 28 skip / 51265 assertions** across 32 isolated runs).
+
+### Round 3 gates
+
+RED, before the production edit, on `aadfb8ef` plus the new tests only:
+
+```sh
+env -u TMPDIR bun test src/__tests__/passthrough-early-stop-integration.test.ts --timeout 30000 --test-name-pattern 'JSON capped proof round3'
+```
+
+Exit **1**, **1 pass / 1 fail**, 4 assertions. `recovers a refused batch whose
+starts carry inline {} and no input_json_delta` received HTTP 500. `fails
+closed when the inline start object differs from the assistant input` already
+failed closed. GREEN on the same command after the edit: exit **0**, **2 pass
+/ 0 fail**, 6 assertions.
+
+Final-tree gates, receipts under
+`/mnt/ai-scratch/meridian-json-capped-500/evidence/round3/`:
+
+| Gate | Exit | Decisive output |
+|---|---:|---|
+| focused command above | 0 | 2 pass / 0 fail |
+| `env -u TMPDIR bun test src/__tests__/passthrough-early-stop-integration.test.ts --timeout 30000` | 0 | **311 pass / 0 fail**, 3133 assertions |
+| `env -u TMPDIR npm test` | 0 | **9178 pass / 0 fail / 28 skip**, 51269 assertions, 32 isolated runs |
+| `npm run typecheck` | 0 | `tsc --noEmit`, no diagnostics |
+| `npm run build` | 0 | `Certified local build 3 (19d5c5ce-b9df-4ecf-9c40-854a0d18b0d3)` |
+| `git diff --check` | 0 | no output |
+| wire matrix, fresh `/tmp/meridian-capped.XXXXXX`, `# scratch-ok` | 0 | **pass 60/60**, 60 `PASS`, 0 `FAIL`; a row passes only when every summary reports `liveModelCalls: 0`. Scratch removed |
+| `--non-stream --calls=2` | 0 | `upstreamCalls: 2`, `liveModelCalls: 0`, `checkpointRetained: false` |
+| `--non-stream --calls=3` | 0 | `upstreamCalls: 2`, `liveModelCalls: 0`, `callCount: 3`, same replay assertions |
+
+`git diff 9434c189 -- src/proxy/server.ts` contains no `streamedToolUseIds`
+line: that set is neither cleared nor filled differently from `9434c189`.
+CLI and matrix state used tmpfs scratch, not virtiofs, and both scratch roots
+were removed after exit 0. No live model call.
+
 ## Capped JSON review follow-up: exact final-attempt proof (2026-11-15)
 
 Follow-up to `9434c189` on `fix/json-capped-refused-500`, confined to the same
@@ -15,13 +83,16 @@ cross-vendor review. No new product or architecture choice is introduced.
   A hidden response's client block still vetoes capped recovery if it did not
   surface in the delivered batch; the existing response-identity filter is
   unchanged and cannot supply completeness proof by itself.
-- **Attempt isolation and input equality:** one non-stream attempt wrapper
-  clears the wire records, active-index map, streamed-ID set, rejection map and
-  start count for each primary/retry/fresh fallback attempt. Each delivered
-  object input must structurally equal strict `JSON.parse(record.json)`.
-  Parsing failure vetoes recovery even if SSE's repair-capable completeness
-  parser accepts the wire string. Existing `node:util.isDeepStrictEqual` usage
-  elsewhere in Meridian supplies the structural comparison convention.
+- **Attempt isolation and input equality:** the round-2 wrapper cleared the
+  wire records, active-index map, streamed-ID set, rejection map and start
+  count for each primary/retry/fresh fallback attempt, and required each
+  delivered object input to structurally equal strict `JSON.parse(record.json)`.
+  Round 3 removes that streamed-ID clear and accepts an empty wire string only
+  when it deep-equals the inline start object; the round-3 section is the
+  current rule. Parsing failure of a non-empty wire string still vetoes
+  recovery even if SSE's repair-capable completeness parser accepts the wire
+  string. Existing `node:util.isDeepStrictEqual` usage elsewhere in Meridian
+  supplies the structural comparison convention.
 - **Actual budget:** the same wrapper records the constructed query's maxTurns,
   including `non_stream_resume_replay` and `non_stream_model_fallback`. Both
   regression scripts prove budgets `[1, 1, 3, 1]`: initial turn, capped resume,
@@ -38,7 +109,7 @@ start. It neither clears that content nor refactors the pre-existing assembly,
 retry, captured-recovery or normal-completion paths. The new stale-content
 regression proves this concrete error-assistant/retry shape.
 
-### Evidence and an unresolved existing-test contradiction
+### Evidence, then the owner's hidden-response decision
 
 Focused command (before production edits, then with the patch):
 
@@ -56,18 +127,19 @@ and nested property-order-independent input equality. Tests were added only;
 all prior tests are byte-for-byte unchanged. Initial generated test names lost
 shell interpolation; `red-focused-final.log` is the named, typechecked RED.
 
-**The requested whole-file/npm gates are not green.** The unchanged test
+**Round 2 left the whole-file and npm gates red on one test.** The then-unchanged
 `JSON capped refused batch safety (hidden-response)` starts an extra client
 block on the wire, supplies neither visible delivery nor CLI rejection for it,
-and expects HTTP 200. Blocker 1 explicitly requires that shape to fail closed.
-The patch returns HTTP 500, as SSE's every-wire-block proof requires. The first
-whole-file run is **308 pass / 1 fail**, 3123 assertions; the npm chain stops at
-that same failure. The operator also required existing tests to stay unchanged,
-so this follow-up deliberately does not change that expectation or weaken the
-proof to obtain a green gate. The contradictory acceptance requirements remain
-an operator resolution, not an accepted test failure or a merge-ready claim.
-The structured-question tool is unavailable on this engineer tool surface;
-`hookctl doctor` exits 0 but does not supply that missing tool.
+and expected HTTP 200. The every-wire-block proof returns HTTP 500. That
+whole-file run was **308 pass / 1 fail**, 3123 assertions, and the npm chain
+stopped at the same failure. Round 2 did not edit the expectation.
+
+**`aadfb8ef` changed that expectation by the owner's decision.** A hidden
+response that starts a client tool block now fails closed, and hidden fragments
+still do not join the recovered batch. On that head the whole file is **309
+pass / 0 fail** and full `env -u TMPDIR npm test` exits **0** (receipts named
+in the round-3 section). Round 3 keeps that expectation. Its own results follow
+the round-3 gate list, not this historical red gate.
 
 Comparison with both original production and tests from `9434c189`: whole file
 exit **0**, **291 pass / 0 fail**, 3069 assertions; complete `env -u TMPDIR npm

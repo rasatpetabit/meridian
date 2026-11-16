@@ -115,6 +115,35 @@ The cause is unknown; the runner keeps only the first error line
 (`scripts/e2e-wire-matrix.mjs:140-143`). Evidence:
 `/mnt/ai-scratch/meridian-bare-name/evidence/flake/report.md`.
 
+### Activation 2026-11-16
+
+Final-head gates on `1ee438db`: `npm test` 9199 pass / 0 fail, build exit 0,
+wire matrix 72/72. Installed and restarted at 17:25:42Z (KillMode=mixed);
+`livez`/`readyz` 200. Rollback:
+`~/.local/state/meridian/rollback/20261116T172505Z/rollback.sh` (prior build
+`2eb2d7a5`).
+
+**Live acceptance is pending.** The target shape is a `tool_use_uncaptured`
+recovery followed by a request carrying 2-3 tool results. Before the fix all
+nine such cases on 2026-11-15 started a new lineage and wrote 115k-343k cache
+tokens. Uncaptured recoveries stopped around 2026-11-15T22 (before this
+deploy) and none occurred in the first three hours after it, so the live effect
+is not yet observed.
+
+**Post-deploy cache gate** (first 39 requests): 0 evictions, 2 writes ≥100k,
+neither from this change. A 113k write followed the client growing its tool set
+from 37 to 41 (`tools_changed`). A 150k write (read 184k -> 25k) hit one Pi
+conversation's first request after the restart, a single-call turn this change
+cannot reach. The CLI transcript recorded a `thinking_drop` attachment for it:
+the API returned `prefix_binding_mismatch` for all 34 prior thinking blocks
+(messages 2-70), and Claude Code 2.1.322 dropped them and retried, rewriting
+the prefix from message 2. Why the API judged the binding mismatched is
+unproven (the rejected attempt's request is not retained). Since 2026-11-13,
+six of about 13,700 continuations within five minutes of the previous request
+wrote ≥100k without a tool change; this is the only one after the 2026-11-14
+fixes. Of 16 conversations that resumed within five minutes of a restart since
+2026-11-14, this is the only one that lost its cache.
+
 ### Qualification boundaries and final-head receipts
 
 Final-head gates are the whole HTTP file, `env -u TMPDIR npm test`, explicit

@@ -1,5 +1,113 @@
 # Mixed and multi-turn rejected checkpoint evidence
 
+## Wholly bare name-dispatch batches (2026-11-15)
+
+**Branch-only implementation on `fix/bare-name-batch-continuation`, based on
+`51cea9b4`. No push, integration, pack/install, service operation or live model
+call.** The operator approved extending the existing mixed hybrid proof to
+wholly refused streamed batches of two or three calls. The concurrent
+`fix/json-capped-refused-500` work overlaps `server.ts`, HTTP tests and the
+checkpoint record; its worktree and non-stream implementation are untouched.
+
+### Predicate and resume analysis
+
+Reused the SSE-local mixed proof from `29239fcc`, the first-fragment hybrid
+from `c2b7a0a1`, and the non-native-image replay guard from `aebca07f`.
+`qualifiesNameDispatchHybridBatch` in `src/proxy/server.ts` is shared by freeze
+and the stream catch: 2–3 complete, naturally stopped, strict-JSON-object
+streamed records; every ID belongs to the checkpoint; one-turn cap; no deferred
+tools, client ToolSearch, dropped calls or duplicates. Every record needs
+positive forwarding capture or both `cliUnavailableToolIds` membership and an
+id/resolved-name match in `cliRejectedToolNames`, naming a declared client tool.
+Thus zero captures is safe only when **every** record has exact name-dispatch
+proof. InputValidationError is not proof. The existing streamed/tracker set
+equality and unambiguous single-tool first-fragment UUID gates remain intact.
+
+Freeze selects the same first UUID/native-call marker and records refusal IDs
+separately from capture. Catch rechecks the same predicate for uncaptured
+recovery, requires the canonical SDK result and existing marker, then uses the
+existing `checkpointProvenToolIds`/`checkpointPublicationRequiresReplay` and
+pinned-transcript publication. Canonical max-turn termination, session identity,
+settlement and abort/publication checks still apply. The single-call exception
+is unchanged. JSON never publishes a native-call marker and remains ineligible.
+
+No follow-up resume change is needed: request preparation already consumes the
+marker independently of capture count, rewinds to the first fragment, sends its
+real result natively and renders later completed call/result records in that
+same SDK user input. Existing complete-result and media guards still replay
+unproved shapes. Publication already clears the consolidated assistant's undo
+UUID whenever that marker is present, including with zero captures. The new
+HTTP positives check both null undo slots, exact first UUID/IDs/native marker,
+resume options, each result exactly once and edited-result replay. Actual CLI
+2.1.322 / SDK 0.2.141 proves the unchanged R1 system/tool/message prefix on all
+three newly qualified rows, plus structural native-result and replay-renderer
+fidelity without CLI rejections or internal-error placeholders.
+
+### RED/GREEN evidence
+
+Persistent logs and requested wire captures:
+`/mnt/ai-scratch/meridian-bare-name/evidence/`. All CLI requests use loopback
+scripted upstreams and disposable tmpfs state; no provider inference. Named
+pre-existing `meridian-stream-evict/evidence/bare-{2,3}.log` corroborates eviction,
+not post-fix production savings.
+
+HTTP command (with `env -u TMPDIR`):
+
+```sh
+bun test src/__tests__/passthrough-early-stop-integration.test.ts --timeout 30000 --test-name-pattern 'hybrid [23]-call bare=-2|bare batch hybrid guard'
+```
+
+With only `server.ts` restored byte-for-byte from `51cea9b4`, final tests give
+**exit 1, 16 pass / 2 fail, 136 assertions**: both new Pi all-bare positives lose
+the mapping; all 16 fail-closed controls pass. Candidate source is restored in
+`finally` (`IMPLEMENTATION_RESTORED True`). Candidate gives **exit 0, 18 pass /
+0 fail, 187 assertions**. Controls cover InputValidationError, partial/wrong
+id/wrong resolved name proof, undeclared tools, raw-tab repair, truncated and
+non-object JSON, missing natural stop, duplicate IDs, four calls, deferred
+tools, JSON, missing canonical result, a dropped hidden retry and abort.
+Existing grouped-boundary, single-call, mixed, captured and media tests remain.
+
+Each wire command uses this prefix and the listed arguments:
+
+```sh
+MERIDIAN_E2E_SCRATCH=<fresh /tmp/meridian-bare.*> bun scripts/e2e-offline-fresh-checkpoint.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322
+```
+
+| Matrix row | Arguments | `51cea9b4` RED | Candidate GREEN |
+|---|---|---|---|
+| `bare-2` (new) | `--calls=2` | exit 1, evicted, R1 message-prefix assertion | exit 0, retained, R1/fidelity/exact-once pass |
+| `bare-2-thinking` (new) | `--thinking --calls=2` | exit 1, evicted, R1 message-prefix assertion | exit 0, retained, R1/fidelity/exact-once pass |
+| `shapes-original-03` | `--thinking --calls=3` | exit 1, evicted, R1 message-prefix assertion | exit 0, retained, R1/fidelity/exact-once pass |
+
+Every GREEN reports exactly two upstream requests and `liveModelCalls:0`.
+The expected policy changes from replay to hybrid; no R1 assertion,
+canonicalization, result-fidelity assertion or replay-control expectation is
+relaxed. The committed matrix row-count guard is now **59**, not removed.
+
+The first new-test typecheck found a conditional-header union not assignable to
+`Record<string,string>` (exit 2 on candidate and baseline implementation with
+identical tests). Adding that explicit annotation fixes the fixture; typecheck
+then exits 0. This was a test typing error, not a baseline production defect.
+
+### Qualification boundaries and final-head receipts
+
+Final-head gates are the whole HTTP file, `env -u TMPDIR npm test`, explicit
+typecheck/build/diff check and the complete committed 59-row wire matrix using
+CLI 2.1.322. Their logs and exit receipts live in the evidence directory above;
+the final handoff reports concrete counts at the committed head. Filesystem
+bookkeeping uses `env -u TMPDIR`; the matrix uses a fresh
+`mktemp -d /tmp/meridian-bare.XXXXXX` (scratch-ok), removed after a passing run,
+never the rejected virtiofs scratch tree for session state.
+
+No new product or architecture decision. Actual Pi/model naming behavior,
+provider billing, post-install cache writes and equal-window cache-journal
+comparison are not measured by an offline prefix test. They remain activation
+qualification, not claimed outcomes. No independent cross-vendor review is
+claimed on this bounded engineer tool surface; parent review before landing
+remains owed. No changes to SDK/CLI, storage schema, public API or resume
+renderers. Out-of-scope JSON capped-error fixes remain with their separate
+builder/worktree.
+
 ## Capped JSON review round 3 (2026-11-15)
 
 Follow-up to `aadfb8ef` on `fix/json-capped-refused-500`, confined to the same

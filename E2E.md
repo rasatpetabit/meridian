@@ -42,9 +42,10 @@ live model name selection or actual prompt-cache billing.
 For exact client-echo lineage diagnostics, add `--thinking --calls=1` or
 `--thinking --calls=3`. `--transient-tail` removes/reappends a two-user request
 suffix on the follow-up: it must reproduce `modified-history`, not silently
-resume changed ancestry. The three-call canonical-rejection control must evict
-its checkpoint and replay every real client result, not qualify native parallel
-resume. See the
+resume changed ancestry. Wholly bare `--calls=2`, `--thinking --calls=2` and
+`--thinking --calls=3` batches must retain a first-fragment hybrid checkpoint,
+not use native parallel resume. Each must pass the unchanged R1 prefix assertion
+and deliver every real result exactly once. See the
 [modified-history diagnosis and evidence](docs/maintenance/MODIFIED_HISTORY_LOOP.md).
 
 Rejected parallel checkpoint controls (all use the same `--claude=...`):
@@ -71,8 +72,9 @@ Rejected parallel checkpoint controls (all use the same `--claude=...`):
   client-visible call; both real results must replay on the follow-up.
 - `--captured --calls=1` preserves captured-call retention. `--deferred
   --calls=1`, with or without `--non-stream`, must evict: positive capture
-  proof has only the canonical single-call name-dispatch and qualified mixed
-  hybrid exceptions at the one-turn cap, not uncaptured deferred completion.
+  proof has only the canonical single-call name-dispatch and qualified
+  name-dispatch hybrid exceptions at the one-turn cap, not uncaptured deferred
+  completion.
 - `--mixed --calls=2 --input-validation` sends a literal tab in the registered
   rejected call's JSON string. The real CLI must record InputValidationError
   before PreToolUse; the checkpoint evicts and both real results replay.

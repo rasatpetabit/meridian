@@ -4238,10 +4238,8 @@ describe("Integration: passthrough early stop", () => {
     expect(capturedQueryParamsAll[1].options.resumeSessionAt).toBe(toolTurn.uuid)
   })
 
-  // A resumed multi-call rejection does not carry the client's real tool
-  // results upstream. Evict two or more rejected calls so the next turn is a
-  // full replay; a single rejected call still keeps the checkpoint above.
-  it("stream: two canonical CLI rejections at the one-turn cap evict the mapping", async () => {
+  // Grouped assistant metadata has no first-fragment hybrid boundary.
+  it("stream: two grouped canonical CLI rejections at the one-turn cap evict the mapping", async () => {
     delete process.env.MERIDIAN_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY
     const sessionHeader = "es-cli-rejected-two-calls"
     const sessionKey = `${sessionHeader}-${TEST_RUN_ID}`
@@ -4486,25 +4484,28 @@ describe("Integration: passthrough early stop", () => {
   }
 
   for (const count of [2, 3]) {
-    for (const bareIndex of new Set([-1, 0, 1, count - 1])) {
+    for (const bareIndex of new Set([-2, -1, 0, 1, count - 1])) {
       it("stream: hybrid " + count + "-call bare=" + bareIndex + " checkpoint resumes first fragment with each real result once", async () => {
         const key = "hybrid-" + count + "-bare-" + bareIndex
+        const headers: Record<string, string> = bareIndex === -2 ? { "x-meridian-agent": "pi", "user-agent": "pi/1.4.0",
+          "x-session-affinity": key + "-" + TEST_RUN_ID } : {}
         const messages = [{ role: "user", content: "read every file" }]
         const calls = Array.from({ length: count }, (_, index) => ({ type: "tool_use",
           id: `hybrid-${index}`, name: "read", input: { file_path: `/file-${index}` } }))
-        const toolName = (index: number) => index === bareIndex ? "read" : "mcp__oc__read"
+        const isBare = (index: number) => bareIndex === -2 || index === bareIndex
+        const toolName = (index: number) => isBare(index) ? "read" : "mcp__oc__read"
         const fragments = calls.map((call, index) => ({ ...assistantMessage([{ ...call, name: toolName(index) }]),
-          ...(index === bareIndex ? { test_skip_pre_tool_hook: true } : {}) }))
+          ...(isBare(index) ? { test_skip_pre_tool_hook: true } : {}) }))
         mockMessages = [messageStart("msg_hybrid"),
           ...calls.flatMap((call, index) => [toolUseBlockStart(index, toolName(index), call.id),
             inputJsonDelta(index, JSON.stringify(call.input)), blockStop(index)]),
           messageDelta("tool_use"), messageStop(),
-          ...fragments.flatMap((fragment, index) => [fragment, index === bareIndex ? unavailableToolMessage(calls[index]!.id, "read") : userDenyMessage(calls[index]!.id)]),
+          ...fragments.flatMap((fragment, index) => [fragment, isBare(index) ? unavailableToolMessage(calls[index]!.id, "read") : userDenyMessage(calls[index]!.id)]),
           { type: "result", subtype: "error_max_turns", is_error: true },
         ]
         mockTerminalError = new Error("Claude Code returned an error result: Reached maximum number of turns (1)")
         const first = await post(app, { model: "opus[1m]", max_tokens: 400, stream: true,
-          tools: [READ_TOOL], messages }, key)
+          tools: [READ_TOOL], messages }, key, headers)
         const body = await first.text()
         expect(first.status).toBe(200)
         expect(body).not.toContain("event: error")
@@ -4513,14 +4514,18 @@ describe("Integration: passthrough early stop", () => {
             typeof block === "object" && block !== null && "type" in block && block.type === "tool_use" &&
             "id" in block && typeof block.id === "string")
           .map(block => block.id)).toEqual(calls.map(call => call.id))
-        expect(lookupSharedSession(key + "-" + TEST_RUN_ID)?.sdkMessageUuids?.[messages.length]).toBeNull()
+        const mapping = lookupSharedSession(key + "-" + TEST_RUN_ID)
+        expect(mapping?.passthroughToolCallIds).toEqual(calls.map(call => call.id))
+        expect(mapping?.passthroughNativeToolCallId).toBe(calls[0]!.id)
+        expect(mapping?.passthroughToolCallAssistantUuid).toBe(fragments[0]!.uuid)
+        expect(mapping?.sdkMessageUuids?.[messages.length]).toBeNull()
         mockTerminalError = undefined
         mockMessages = [assistantMessage([{ type: "text", text: "all results received" }])]
         const next = await post(app, { model: "opus[1m]", max_tokens: 400, stream: true,
           tools: [READ_TOOL], messages: [...messages, { role: "assistant", content: calls },
             { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
               content: `REAL_CLIENT_RESULT_${call.id}` })) }],
-        }, key)
+        }, key, headers)
         expect(await next.text()).toContain("all results received")
         expect(capturedQueryParamsAll).toHaveLength(2)
         expect(capturedQueryParams.options.resume).toBe(initialManagedSessionId())
@@ -4547,7 +4552,7 @@ describe("Integration: passthrough early stop", () => {
           tools: [READ_TOOL], messages: [...messages, { role: "assistant", content: calls },
             { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
               content: "EDITED_RESULT_" + call.id })) }],
-        }, key)
+        }, key, headers)
         expect(await undo.text()).toContain("all results received")
         expect(capturedQueryParams.options.resume).toBeUndefined()
         expect(capturedQueryParams.options.resumeSessionAt).toBeUndefined()
@@ -4555,6 +4560,63 @@ describe("Integration: passthrough early stop", () => {
         for (const call of calls) expect(undoPrompt).toContain("EDITED_RESULT_" + call.id)
       })
     }
+  }
+
+  for (const shape of ["input-validation", "partial-proof", "wrong-name", "wrong-id", "undeclared",
+    "raw-tab", "incomplete-json", "non-object", "unclosed", "duplicate", "four-calls", "deferred",
+    "non-stream", "no-result", "dropped", "abort"] as const) {
+    it("bare batch hybrid guard replays " + shape, async () => {
+      const key = "bare-batch-control-" + shape
+      const messages = [{ role: "user", content: "read all files" }]
+      const calls = Array.from({ length: shape === "four-calls" ? 4 : 2 }, (_, index) => ({
+        type: "tool_use", id: "bare-control-" + (shape === "duplicate" ? 0 : index),
+        name: shape === "undeclared" && index === 1 ? "not_declared" : "read",
+        input: { file_path: "/file-" + index },
+      }))
+      const tools = [READ_TOOL, ...(shape === "deferred" ? [{ name: "lsp_diagnostics", defer_loading: true,
+        input_schema: { type: "object" } }] : [])]
+      mockMessages = [messageStart("msg_bare_control"),
+        ...calls.flatMap((call, index) => [toolUseBlockStart(index, call.name, call.id),
+          inputJsonDelta(index, index !== 1 ? JSON.stringify(call.input) : shape === "raw-tab"
+            ? '{"file_path":"raw' + String.fromCharCode(9) + 'tab"}'
+            : shape === "incomplete-json" ? '{"file_path":' : shape === "non-object" ? '[]' : JSON.stringify(call.input)),
+          ...(shape === "unclosed" && index === 1 ? [] : [blockStop(index)])]),
+        messageDelta("tool_use"), messageStop(),
+        ...calls.map(call => ({ ...assistantMessage([call]), test_skip_pre_tool_hook: true })),
+        ...calls.flatMap((call, index) => index === 1 && shape === "partial-proof" ? []
+          : index === 1 && shape === "input-validation" ? [{ type: "user", message: { content: [{
+            type: "tool_result", tool_use_id: call.id, is_error: true,
+            content: "<tool_use_error>InputValidationError: read was called with input that could not be parsed as JSON.\nInvalid JSON.</tool_use_error>",
+          }] } }]
+          : [unavailableToolMessage(index === 1 && shape === "wrong-id" ? "other-id" : call.id,
+            index === 1 && shape === "wrong-name" ? "other-name" : call.name)]),
+        ...(shape === "dropped" ? [{ type: "test_pre_tool_hook", tool_name: "mcp__oc__read",
+          tool_use_id: "hidden-retry", tool_input: { file_path: "/hidden" } }] : []),
+        ...(shape === "no-result" ? [] : [{ type: "result", subtype: "error_max_turns", is_error: true }]),
+      ]
+      mockTerminalError = new Error("Claude Code returned an error result: Reached maximum number of turns (1)")
+      if (shape === "abort") mockBeforeTerminalError = () => {
+        capturedQueryParams.options.abortController.abort(new Error("aborted"))
+      }
+      const first = await post(app, { model: "opus[1m]", max_tokens: 400, stream: shape !== "non-stream", tools, messages }, key)
+      await first.text()
+      expect(lookupSharedSession(key + "-" + TEST_RUN_ID)).toBeUndefined()
+      mockBeforeTerminalError = undefined
+      mockTerminalError = undefined
+      mockMessages = [assistantMessage([{ type: "text", text: "replayed results" }])]
+      const next = await post(app, { model: "opus[1m]", max_tokens: 400, stream: true, tools,
+        messages: [...messages, { role: "assistant", content: calls },
+          { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
+            content: "REAL_CLIENT_RESULT_" + call.id })) }],
+      }, key)
+      expect(await next.text()).toContain("replayed results")
+      expect(capturedQueryParams.options.resume).toBeUndefined()
+      expect(capturedQueryParams.options.resumeSessionAt).toBeUndefined()
+      const prompt = await serializedPrompt(capturedQueryParams.prompt)
+      if (shape !== "duplicate") for (const call of calls) expect(prompt.split("REAL_CLIENT_RESULT_" + call.id)).toHaveLength(2)
+      expect(prompt).not.toContain("No such tool available")
+      expect(prompt).not.toContain("<tool_use_error>")
+    })
   }
 
   for (const shape of ["grouped", "raw-tab", "incomplete-json", "undeclared", "wrong-name", "wrong-id", "deferred", "non-stream"] as const) {

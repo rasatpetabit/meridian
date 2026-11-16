@@ -50,6 +50,8 @@ export const ROWS = [
   { label: "shapes-original-01", args: [] },
   { label: "shapes-original-02", args: ["--thinking", "--calls=1"] },
   { label: "shapes-original-03", args: ["--thinking", "--calls=3"] },
+  { label: "bare-2", args: ["--calls=2"] },
+  { label: "bare-2-thinking", args: ["--thinking", "--calls=2"] },
   { label: "shapes-original-04", args: ["--mixed", "--calls=2"] },
   { label: "shapes-original-05", args: ["--mixed", "--calls=2", "--input-validation"] },
   { label: "shapes-original-06", args: ["--deferred", "--calls=2"] },
@@ -108,7 +110,7 @@ function fail(message) {
 function assertRowList() {
   const forbidden = /^(?:--claude|--source-root|--wire)(?:=|$)/
   const labels = new Set()
-  if (ROWS.length !== 70) fail(`wire matrix has ${ROWS.length} rows, expected 70`)
+  if (ROWS.length !== 72) fail(`wire matrix has ${ROWS.length} rows, expected 72`)
   for (const row of ROWS) {
     if (labels.has(row.label)) fail(`duplicate wire-matrix row ${row.label}`)
     labels.add(row.label)

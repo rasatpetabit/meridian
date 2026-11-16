@@ -6380,6 +6380,22 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               ? new Set([...forwardedToolUseIds, ...hybridNameDispatchToolIds])
               : forwardedToolUseIds
 
+            const qualifiesNameDispatchHybridBatch = (ids: readonly string[]): boolean =>
+              ids.length >= 2 && ids.length <= 3 &&
+              lastAttemptMaxTurns === 1 && !sawDuplicateToolUse &&
+              !hasDeferredTools && !clientToolSearch && droppedToolUseIds.size === 0 &&
+              streamedToolBlockRecords.size === ids.length &&
+              [...streamedToolBlockRecords.values()].every(record => {
+                if (!ids.includes(record.id) || streamedToolBlockVeto(record)) return false
+                if (record.json.trim()) {
+                  try { JSON.parse(record.json) } catch { return false }
+                }
+                return forwardedToolUseIds.has(record.id) || (
+                  cliUnavailableToolIds.has(record.id) &&
+                  cliRejectedToolNames.get(record.id) === record.name &&
+                  requestTools.some((tool: { name: string }) => tool.name === record.name))
+              })
+
             // Call only after shouldEarlyStop(earlyStop) returned true.
             const freezeEarlyStopCheckpoint = (): void => {
               nextPassthroughToolCallAssistantUuid = settledToolCallAssistantUuid(earlyStop)
@@ -6387,26 +6403,12 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               // recognizes a duplicate. The client will return each ID.
               nextPassthroughToolCallIds = [...earlyStop.expected].filter(id =>
                 !droppedToolUseIds.has(id) || streamedToolUseIds.has(id))
-              const mixedNameDispatchBatch = nextPassthroughToolCallIds.length >= 2 &&
-                nextPassthroughToolCallIds.length <= 3 &&
-                capturedToolUses.length > 0 && lastAttemptMaxTurns === 1 &&
-                !hasDeferredTools && !clientToolSearch && droppedToolUseIds.size === 0 &&
-                streamedToolBlockRecords.size === nextPassthroughToolCallIds.length &&
-                [...streamedToolBlockRecords.values()].every(record => {
-                  if (!nextPassthroughToolCallIds!.includes(record.id) || streamedToolBlockVeto(record)) return false
-                  if (record.json.trim()) {
-                    try { JSON.parse(record.json) } catch { return false }
-                  }
-                  return forwardedToolUseIds.has(record.id) || (
-                    cliUnavailableToolIds.has(record.id) &&
-                    cliRejectedToolNames.get(record.id) === record.name &&
-                    requestTools.some((tool: { name: string }) => tool.name === record.name))
-                })
+              const nameDispatchHybridBatch = qualifiesNameDispatchHybridBatch(nextPassthroughToolCallIds)
               if (nextPassthroughToolCallIds.length > 1 && streamEventsSeen > 0 &&
                 earlyStop.firstToolCallAssistantUuid && earlyStop.firstToolCallId &&
                 trackerCoversStreamedCalls(earlyStop, streamedToolUseIds) &&
-                (nextPassthroughToolCallIds.every(id => forwardedToolUseIds.has(id)) || mixedNameDispatchBatch)) {
-                if (mixedNameDispatchBatch) for (const id of nextPassthroughToolCallIds) {
+                (nextPassthroughToolCallIds.every(id => forwardedToolUseIds.has(id)) || nameDispatchHybridBatch)) {
+                if (nameDispatchHybridBatch) for (const id of nextPassthroughToolCallIds) {
                   if (!forwardedToolUseIds.has(id)) hybridNameDispatchToolIds.add(id)
                 }
                 nextPassthroughToolCallAssistantUuid = earlyStop.firstToolCallAssistantUuid
@@ -8519,7 +8521,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               // evicted.
               //
               // The single-call exception remains separate from the qualified
-              // first-fragment hybrid proof frozen for a mixed batch.
+              // first-fragment hybrid proof frozen for a name-dispatch batch.
               const canonicalRejectedCheckpoint =
                 uncapturedRecoveryActive &&
                 confirmedToolUnavailable &&
@@ -8531,8 +8533,12 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 [...streamedToolBlockRecords.values()].every(record =>
                   cliUnavailableToolIds.has(record.id) &&
                   requestTools.some((tool: { name: string }) => tool.name === record.name))
+              const canonicalRejectedHybridCheckpoint =
+                uncapturedRecoveryActive && sawCanonicalResult &&
+                Boolean(nextPassthroughNativeToolCallId) &&
+                qualifiesNameDispatchHybridBatch(nextPassthroughToolCallIds ?? [])
               const recoverableCheckpoint =
-                (canRecoverAsToolUse || canonicalRejectedCheckpoint) &&
+                (canRecoverAsToolUse || canonicalRejectedCheckpoint || canonicalRejectedHybridCheckpoint) &&
                 !checkpointPublicationRequiresReplay({
                   clientToolCallIds: [...streamedToolUseIds, ...capturedToolUses.map(tool => tool.id)],
                   checkpointToolCallIds: nextPassthroughToolCallIds,

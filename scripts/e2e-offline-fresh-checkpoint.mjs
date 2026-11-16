@@ -15,7 +15,7 @@
 // --sse-delay-ms=25 paces individual upstream frames; --distinct-tools with
 // --captured uses a different registered tool for each parallel call.
 // A single name-dispatch rejection at maxTurns=1 retains and resumes. Other
-// uncaptured calls replay unless a mixed streamed batch qualifies for hybrid resume.
+// uncaptured calls replay unless a name-dispatch streamed batch qualifies for hybrid resume.
 import assert from "node:assert/strict"
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
@@ -66,7 +66,7 @@ assert(!capturedLast || mixed, "--captured-last requires --mixed")
 assert(!mixed || callCount > 1, "--mixed requires at least two calls")
 assert(!(mixed && captured), "choose --mixed or --captured")
 assert(!unstreamed || captured || mixed, "--unstreamed requires --captured or --mixed")
-const extended = mixed || deferred || nonStream || captured || inputValidation || unstreamed
+const extended = mixed || deferred || nonStream || captured || inputValidation || unstreamed || callCount > 1
 const digestExpected = deferred && !mixed && !captured
 const calls = Array.from({ length: callCount }, (_, index) => ({
   type: "tool_use", id: index === 0 ? "toolu_offline" : "toolu_offline_" + index,
@@ -232,7 +232,7 @@ try {
   assert(!firstBody.includes("hidden digest"), "hidden second-turn digest must not reach the client")
   assert(firstBody.includes('"stop_reason":"tool_use"'), firstBody)
   assert.equal(firstRequestCalls, digestExpected ? 2 : 1, "deferred flow must complete its hidden second model turn")
-  const hybrid = (captured || (mixed && !deferred && !inputValidation)) && callCount > 1 && !nonStream && !unstreamed
+  const hybrid = (captured || (!deferred && !inputValidation)) && callCount > 1 && !nonStream && !unstreamed
   const retainCheckpoint = hybrid || (captured && callCount === 1) || (!nonStream && !mixed && !deferred && !inputValidation && callCount === 1)
   const mapping = lookupSharedSession("offline:" + session)
   const rejectionText = "<tool_use_error>Error: No such tool available: read</tool_use_error>"

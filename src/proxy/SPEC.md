@@ -203,8 +203,8 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   client, an id/name-matched CLI name-dispatch refusal for that call, no
   dropped calls, and the ordinary settled assistant UUID/full-call-set and
   publication guards. Resume rewinds before the rejection and appends the
-  real client result. Apart from this exception and the qualified mixed hybrid
-  below, checkpoint retention requires positive PreToolUse capture proof for
+  real client result. Apart from this exception and the qualified name-dispatch
+  hybrid below, checkpoint retention requires positive PreToolUse capture proof for
   every call ID, on JSON completion, SSE completion and captured-error recovery.
   Other uncaptured calls evict the checkpoint, including InputValidationError
   and single-call deferred completion. JSON also checks
@@ -216,15 +216,19 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   canonical settled checkpoint covering every streamed/client-visible call,
   with positive PreToolUse capture for every observed call and a first
   assistant fragment containing exactly one tool use.
-  **Mixed name-dispatch batches of two or three calls also qualify** at the
-  one-turn cap, with at least one captured call: every uncaptured call must
+  **Name-dispatch batches of two or three calls also qualify**, mixed or
+  wholly refused, at the one-turn cap: every uncaptured call must
   have an id/name-matched CLI name-dispatch refusal (`cliUnavailableToolIds`),
   name a declared client tool, and have a naturally closed, strictly valid
   JSON object input on the client wire. Raw-control-character repair is not
   qualification. Require the exact complete streamed/tracked call set, no
-  dropped calls, no deferred tools or client ToolSearch, and the same canonical
-  SDK-result/publication/abort guards. Keep this proof separate from actual
-  PreToolUse capture; it applies only with the explicit hybrid marker. Either
+  dropped or duplicate calls, no deferred tools or client ToolSearch, and the
+  same canonical SDK-result/publication/abort guards. Freeze and capped-error
+  recovery share one qualifying predicate; zero captured calls is not a veto
+  when every call has that exact name-dispatch proof. InputValidationError,
+  partial proof and batches larger than three remain replay-only. Keep this
+  proof separate from actual PreToolUse capture; it applies only with the
+  explicit hybrid marker. Either
   the first call or later calls may be bare. Rewind before every CLI rejection;
   none of its text may appear in any resumed upstream request. Store that first
   UUID, all pending client IDs and `passthroughNativeToolCallId` identifying the
@@ -264,6 +268,11 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   bare-first/bare-later two-/three-call R1, exact-once real result fidelity and
   follow-on prefix preservation, including thinking. They do not measure live
   model tool-name selection, provider cache billing or production savings.
+  Wholly bare two-call batches, with and without thinking, and a thinking
+  three-call batch also pass the unchanged R1 prefix and exact-once-result
+  assertions on that same SDK/CLI tuple. They use the same first-fragment
+  marker and null undo UUID as mixed batches; no new resume path is needed.
+  JSON publishes no native-call marker and remains ineligible.
   The production motivation was 81/81 captured multi-call evictions in 8.5 h,
   139/143 new-lineage requests writing >=100k tokens (37.3M total), versus
   99.4% cache hits over 2269 continuation requests. These are observed token

@@ -19,6 +19,8 @@ export const ROWS = [
   { label: "keepalive-parallel2", args: ["--keepalive=parallel2"] },
   { label: "keepalive-parallel3", args: ["--keepalive=parallel3", "--keepalive-prove-red"] },
   { label: "keepalive-checkpoint", args: ["--keepalive=checkpoint"] },
+  // One pending call: an ask_user_question left waiting while the operator is away.
+  { label: "keepalive-checkpoint-single", args: ["--keepalive=checkpoint1"] },
   { label: "keepalive-mixed-bare", args: ["--keepalive=mixed", "--mixed", "--bare-call=2"] },
   { label: "keepalive-thinking", args: ["--keepalive=thinking"] },
   { label: "keepalive-5m-skip", args: ["--keepalive=5m", "--keepalive-prove-red"] },
@@ -102,7 +104,7 @@ function fail(message) {
 function assertRowList() {
   const forbidden = /^(?:--claude|--source-root|--wire)(?:=|$)/
   const labels = new Set()
-  if (ROWS.length !== 66) fail(`wire matrix has ${ROWS.length} rows, expected 66`)
+  if (ROWS.length !== 67) fail(`wire matrix has ${ROWS.length} rows, expected 67`)
   for (const row of ROWS) {
     if (labels.has(row.label)) fail(`duplicate wire-matrix row ${row.label}`)
     labels.add(row.label)

@@ -9,7 +9,7 @@ import { join, resolve } from "node:path"
 export async function runKeepalive() {
   const arg = name => process.argv.find(value => value.startsWith(`--${name}=`))?.slice(name.length + 3)
   const shape = arg("keepalive")
-  assert(["text", "single", "parallel2", "parallel3", "checkpoint", "mixed", "thinking", "5m", "wide"].includes(shape), "unknown keepalive shape")
+  assert(["text", "single", "parallel2", "parallel3", "checkpoint", "checkpoint1", "mixed", "thinking", "5m", "wide"].includes(shape), "unknown keepalive shape")
   assert(arg("claude"), "pass --claude=/absolute/path/to/claude")
   const cli = resolve(arg("claude"))
   const proveRed = process.argv.includes("--keepalive-prove-red")
@@ -217,7 +217,7 @@ export async function runKeepalive() {
       assert.deepEqual(first.filter(block => block.type === "tool_use"), calls, "every tool call must reach client")
       history = [...history, { role: "assistant", content: first }, { role: "user", content: count
         ? calls.map(call => ({ type: "tool_result", tool_use_id: call.id, content: result(call) })) : "continue fixture" }]
-      const checkpoint = shape === "checkpoint" || shape === "wide"
+      const checkpoint = shape === "checkpoint" || shape === "checkpoint1" || shape === "wide"
       if (!checkpoint) {
         const output = await continueWith(history)
         history = [...history, { role: "assistant", content: output }, { role: "user", content: "final follow-on" }]

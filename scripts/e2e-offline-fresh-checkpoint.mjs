@@ -20,6 +20,12 @@ import assert from "node:assert/strict"
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 
+if (process.argv.some(arg => arg.startsWith("--keepalive="))) {
+  const { runKeepalive } = await import("./e2e-offline-keepalive.mjs")
+  await runKeepalive()
+  process.exit(0)
+}
+
 const executable = process.argv.find(arg => arg.startsWith("--claude="))?.slice(9)
 assert(executable, "pass --claude=/absolute/path/to/claude")
 const cli = resolve(executable)

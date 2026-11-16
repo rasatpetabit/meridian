@@ -1,0 +1,136 @@
+keepalive-text: PASS beat abort: upstream cancelled after message_start; no output sent
+keepalive-text: PASS beat prefix: byte-identical system/tools; R1 message content unchanged {"bytes":7941,"estimatedTokens":2268,"method":"Meridian replayBudget estimate (not provider tokenization)"}
+keepalive-text: PASS follow-on: no-beat control byte-identical (session metadata excluded); continuation; real results exactly once; no beat prompt/output; same warmed prefix
+keepalive-text: {"shape":"text","beatPrefix":{"bytes":7941,"estimatedTokens":2268,"method":"Meridian replayBudget estimate (not provider tokenization)"},"cli":"2.1.322 (Claude Code)","sdk":"0.2.141","upstreamCalls":7,"liveModelCalls":0}
+PASS keepalive-text
+keepalive-single: PASS beat abort: upstream cancelled after message_start; no output sent
+keepalive-single: PASS beat prefix: byte-identical system/tools; R1 message content unchanged {"bytes":8061,"estimatedTokens":2302,"method":"Meridian replayBudget estimate (not provider tokenization)"}
+keepalive-single: PASS follow-on: no-beat control byte-identical (session metadata excluded); continuation; real results exactly once; no beat prompt/output; same warmed prefix
+keepalive-single: {"shape":"single","beatPrefix":{"bytes":8061,"estimatedTokens":2302,"method":"Meridian replayBudget estimate (not provider tokenization)"},"cli":"2.1.322 (Claude Code)","sdk":"0.2.141","upstreamCalls":7,"liveModelCalls":0}
+PASS keepalive-single
+keepalive-parallel2: PASS hybrid witness: 2 calls; first native result and later completed-call records
+keepalive-parallel2: PASS hybrid witness: 2 calls; first native result and later completed-call records
+keepalive-parallel2: PASS beat abort: upstream cancelled after message_start; no output sent
+keepalive-parallel2: PASS beat prefix: byte-identical system/tools; R1 message content unchanged {"bytes":8385,"estimatedTokens":2395,"method":"Meridian replayBudget estimate (not provider tokenization)"}
+keepalive-parallel2: PASS follow-on: no-beat control byte-identical (session metadata excluded); continuation; real results exactly once; no beat prompt/output; same warmed prefix
+keepalive-parallel2: {"shape":"parallel2","beatPrefix":{"bytes":8385,"estimatedTokens":2395,"method":"Meridian replayBudget estimate (not provider tokenization)"},"cli":"2.1.322 (Claude Code)","sdk":"0.2.141","upstreamCalls":7,"liveModelCalls":0}
+PASS keepalive-parallel2
+keepalive-parallel3: PASS hybrid witness: 3 calls; first native result and later completed-call records
+keepalive-parallel3: PASS RED demonstration: lineage rejects perturbed recorded-wire witness (restored)
+keepalive-parallel3: PASS hybrid witness: 3 calls; first native result and later completed-call records
+keepalive-parallel3: PASS RED demonstration: first-response abort rejects perturbed recorded-wire witness (restored)
+keepalive-parallel3: PASS beat abort: upstream cancelled after message_start; no output sent
+keepalive-parallel3: PASS RED demonstration: system bytes rejects perturbed recorded-wire witness (restored)
+keepalive-parallel3: PASS RED demonstration: tools bytes rejects perturbed recorded-wire witness (restored)
+keepalive-parallel3: PASS RED demonstration: message content prefix rejects perturbed recorded-wire witness (restored)
+keepalive-parallel3: PASS beat prefix: byte-identical system/tools; R1 message content unchanged {"bytes":8709,"estimatedTokens":2487,"method":"Meridian replayBudget estimate (not provider tokenization)"}
+keepalive-parallel3: PASS RED demonstration: transcript immutability rejects perturbed recorded-wire witness (restored)
+keepalive-parallel3: PASS RED demonstration: mapping immutability rejects perturbed recorded-wire witness (restored)
+keepalive-parallel3: PASS RED demonstration: lineage rejects perturbed recorded-wire witness (restored)
+keepalive-parallel3: PASS RED demonstration: no-beat control rejects perturbed recorded-wire witness (restored)
+keepalive-parallel3: PASS RED demonstration: prompt isolation rejects perturbed recorded-wire witness (restored)
+keepalive-parallel3: PASS RED demonstration: output isolation rejects perturbed recorded-wire witness (restored)
+keepalive-parallel3: PASS RED demonstration: exactly-once results rejects perturbed recorded-wire witness (restored)
+keepalive-parallel3: PASS follow-on: no-beat control byte-identical (session metadata excluded); continuation; real results exactly once; no beat prompt/output; same warmed prefix
+keepalive-parallel3: {"shape":"parallel3","beatPrefix":{"bytes":8709,"estimatedTokens":2487,"method":"Meridian replayBudget estimate (not provider tokenization)"},"cli":"2.1.322 (Claude Code)","sdk":"0.2.141","upstreamCalls":7,"liveModelCalls":0}
+PASS keepalive-parallel3
+keepalive-checkpoint: PASS beat abort: upstream cancelled after message_start; no output sent
+keepalive-checkpoint: PASS beat prefix: byte-identical system/tools; R1 message content unchanged {"bytes":7821,"estimatedTokens":2234,"method":"Meridian replayBudget estimate (not provider tokenization)"}
+keepalive-checkpoint: PASS follow-on: no-beat control byte-identical (session metadata excluded); continuation; real results exactly once; no beat prompt/output; same warmed prefix
+keepalive-checkpoint: {"shape":"checkpoint","beatPrefix":{"bytes":7821,"estimatedTokens":2234,"method":"Meridian replayBudget estimate (not provider tokenization)"},"cli":"2.1.322 (Claude Code)","sdk":"0.2.141","upstreamCalls":5,"liveModelCalls":0}
+PASS keepalive-checkpoint
+keepalive-mixed-bare: PASS hybrid witness: 3 calls; first native result and later completed-call records
+keepalive-mixed-bare: PASS hybrid witness: 3 calls; first native result and later completed-call records
+keepalive-mixed-bare: PASS beat abort: upstream cancelled after message_start; no output sent
+keepalive-mixed-bare: PASS beat prefix: byte-identical system/tools; R1 message content unchanged {"bytes":8709,"estimatedTokens":2487,"method":"Meridian replayBudget estimate (not provider tokenization)"}
+keepalive-mixed-bare: PASS follow-on: no-beat control byte-identical (session metadata excluded); continuation; real results exactly once; no beat prompt/output; same warmed prefix
+keepalive-mixed-bare: {"shape":"mixed","beatPrefix":{"bytes":8709,"estimatedTokens":2487,"method":"Meridian replayBudget estimate (not provider tokenization)"},"cli":"2.1.322 (Claude Code)","sdk":"0.2.141","upstreamCalls":7,"liveModelCalls":0}
+PASS keepalive-mixed-bare
+keepalive-thinking: PASS beat abort: upstream cancelled after message_start; no output sent
+keepalive-thinking: PASS beat prefix: byte-identical system/tools; R1 message content unchanged {"bytes":8142,"estimatedTokens":2325,"method":"Meridian replayBudget estimate (not provider tokenization)"}
+keepalive-thinking: PASS follow-on: no-beat control byte-identical (session metadata excluded); continuation; real results exactly once; no beat prompt/output; same warmed prefix
+keepalive-thinking: {"shape":"thinking","beatPrefix":{"bytes":8142,"estimatedTokens":2325,"method":"Meridian replayBudget estimate (not provider tokenization)"},"cli":"2.1.322 (Claude Code)","sdk":"0.2.141","upstreamCalls":7,"liveModelCalls":0}
+PASS keepalive-thinking
+keepalive-5m-skip: PASS RED demonstration: lineage rejects perturbed recorded-wire witness (restored)
+keepalive-5m-skip: PASS RED demonstration: ineligible skip rejects perturbed recorded-wire witness (restored)
+keepalive-5m-skip: PASS keepalive skip: ephemeral_5m_input_tokens; zero upstream requests
+keepalive-5m-skip: PASS RED demonstration: transcript immutability rejects perturbed recorded-wire witness (restored)
+keepalive-5m-skip: PASS RED demonstration: mapping immutability rejects perturbed recorded-wire witness (restored)
+keepalive-5m-skip: PASS RED demonstration: lineage rejects perturbed recorded-wire witness (restored)
+keepalive-5m-skip: PASS RED demonstration: no-beat control rejects perturbed recorded-wire witness (restored)
+keepalive-5m-skip: PASS RED demonstration: prompt isolation rejects perturbed recorded-wire witness (restored)
+keepalive-5m-skip: PASS RED demonstration: output isolation rejects perturbed recorded-wire witness (restored)
+keepalive-5m-skip: PASS RED demonstration: exactly-once results rejects perturbed recorded-wire witness (restored)
+keepalive-5m-skip: PASS follow-on: no-beat control byte-identical (session metadata excluded); continuation; real results exactly once; no beat prompt/output; ineligible skip
+keepalive-5m-skip: {"shape":"5m","cli":"2.1.322 (Claude Code)","sdk":"0.2.141","upstreamCalls":6,"liveModelCalls":0}
+PASS keepalive-5m-skip
+keepalive-wide-skip: PASS RED demonstration: ineligible skip rejects perturbed recorded-wire witness (restored)
+keepalive-wide-skip: PASS keepalive skip: 9 pending calls (>8); zero upstream requests
+keepalive-wide-skip: PASS RED demonstration: transcript immutability rejects perturbed recorded-wire witness (restored)
+keepalive-wide-skip: PASS RED demonstration: mapping immutability rejects perturbed recorded-wire witness (restored)
+keepalive-wide-skip: PASS RED demonstration: lineage rejects perturbed recorded-wire witness (restored)
+keepalive-wide-skip: PASS RED demonstration: no-beat control rejects perturbed recorded-wire witness (restored)
+keepalive-wide-skip: PASS RED demonstration: prompt isolation rejects perturbed recorded-wire witness (restored)
+keepalive-wide-skip: PASS RED demonstration: output isolation rejects perturbed recorded-wire witness (restored)
+keepalive-wide-skip: PASS RED demonstration: exactly-once results rejects perturbed recorded-wire witness (restored)
+keepalive-wide-skip: PASS follow-on: no-beat control byte-identical (session metadata excluded); continuation; real results exactly once; no beat prompt/output; ineligible skip
+keepalive-wide-skip: {"shape":"wide","cli":"2.1.322 (Claude Code)","sdk":"0.2.141","upstreamCalls":4,"liveModelCalls":0}
+PASS keepalive-wide-skip
+PASS shapes-error-first-2
+PASS shapes-error-first-2-follow
+PASS shapes-error-first-3
+PASS shapes-error-first-3-follow
+PASS shapes-error-later-2
+PASS shapes-error-later-2-follow
+PASS shapes-error-later-3
+PASS shapes-error-later-3-follow
+PASS shapes-image-first-2
+PASS shapes-image-first-2-follow
+PASS shapes-image-first-3
+PASS shapes-image-first-3-follow
+PASS shapes-image-later-2
+PASS shapes-image-later-2-follow
+PASS shapes-image-later-3
+PASS shapes-image-later-3-follow
+PASS shapes-reversed-2
+PASS shapes-reversed-2-follow
+PASS shapes-reversed-3
+PASS shapes-reversed-3-follow
+PASS shapes-missing-later-2
+PASS shapes-missing-later-2-follow
+PASS shapes-original-01
+PASS shapes-original-02
+PASS shapes-original-03
+PASS shapes-original-04
+PASS shapes-original-05
+PASS shapes-original-06
+PASS shapes-original-07
+PASS shapes-original-08
+PASS shapes-original-09
+PASS shapes-original-10
+PASS shapes-original-11
+PASS shapes-original-12
+PASS shapes-original-13
+PASS shapes-original-14
+PASS shapes-original-15
+PASS shapes-original-16
+PASS shapes-original-17
+PASS shapes-original-18
+PASS shapes-original-19
+PASS shapes-original-20
+PASS shapes-original-21
+PASS shapes-original-22
+PASS shapes-original-23
+PASS shapes-original-24
+PASS json-deferred-refused-2
+PASS json-deferred-refused-3
+PASS mixed-bare-2-1-follow
+PASS mixed-bare-2-2-follow
+PASS mixed-bare-3-1-follow
+PASS mixed-bare-3-2-follow-thinking
+PASS mixed-bare-3-3-follow
+PASS mixed-two-bare-later-3-follow
+PASS mixed-two-bare-first-3-follow
+PASS mixed-deferred-control
+PASS mixed-non-stream-control
+pass 66/66

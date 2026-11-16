@@ -9337,3 +9337,27 @@ not establish net savings or cost improvement.
 
 Linux evidence and limitations:
 [drop-prior-thinking](docs/maintenance/evidence/drop-prior-thinking.md).
+
+## Prompt-cache keepalive native wire matrix (offline)
+
+```sh
+MERIDIAN_E2E_SCRATCH=/tmp/meridian-keepalive-scratch TMPDIR=/tmp \
+  bun scripts/e2e-wire-matrix.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322
+```
+
+The nine `keepalive-*` rows each run real HTTP/SDK/native-CLI turns, a due beat
+(or an eligibility skip), and a follow-on alongside an independent no-beat
+control. They cover text completion, captured single and 2/3-call hybrid
+continuations, a pending-tool checkpoint, mixed bare-name dispatch, thinking,
+five-minute writes and nine pending calls. `--keepalive-prove-red` checks the
+assertions against deliberately corrupted copies of real wire witnesses;
+`--keepalive=parallel3 --keepalive-red=tools` on the checkpoint harness must
+exit nonzero after adding an extra MCP tool to the native beat only.
+
+System/tools are byte-identical; message content uses the existing matrix R1
+convention (moving cache markers and string/single-text-block representation).
+The full follow-on body equals its control except independent SDK session
+metadata. Prefix tokens are explicitly labelled local estimates, not fake API
+usage or provider token counts. This proves native wire compatibility, **not**
+actual provider cache warmth after an idle hour or production eligibility.
+See [commands, decisive output, RED controls, live facts and evidence limits](docs/maintenance/evidence/keepalive-wire.md).

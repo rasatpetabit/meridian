@@ -13,6 +13,16 @@ const ROW_TIMEOUT_MS = 300_000
 
 /** Harness flags for every real-CLI offline matrix row, in capture order. */
 export const ROWS = [
+  // Each keepalive row includes its own no-beat control, through the real CLI.
+  { label: "keepalive-text", args: ["--keepalive=text"] },
+  { label: "keepalive-single", args: ["--keepalive=single"] },
+  { label: "keepalive-parallel2", args: ["--keepalive=parallel2"] },
+  { label: "keepalive-parallel3", args: ["--keepalive=parallel3", "--keepalive-prove-red"] },
+  { label: "keepalive-checkpoint", args: ["--keepalive=checkpoint"] },
+  { label: "keepalive-mixed-bare", args: ["--keepalive=mixed", "--mixed", "--bare-call=2"] },
+  { label: "keepalive-thinking", args: ["--keepalive=thinking"] },
+  { label: "keepalive-5m-skip", args: ["--keepalive=5m", "--keepalive-prove-red"] },
+  { label: "keepalive-wide-skip", args: ["--keepalive=wide", "--keepalive-prove-red"] },
   { label: "shapes-error-first-2", args: ["--captured", "--calls=2", "--result-kind=error-first"] },
   { label: "shapes-error-first-2-follow", args: ["--captured", "--calls=2", "--result-kind=error-first", "--follow-on"] },
   { label: "shapes-error-first-3", args: ["--captured", "--calls=3", "--result-kind=error-first"] },
@@ -92,7 +102,7 @@ function fail(message) {
 function assertRowList() {
   const forbidden = /^(?:--claude|--source-root|--wire)(?:=|$)/
   const labels = new Set()
-  if (ROWS.length !== 57) fail(`wire matrix has ${ROWS.length} rows, expected 57`)
+  if (ROWS.length !== 66) fail(`wire matrix has ${ROWS.length} rows, expected 66`)
   for (const row of ROWS) {
     if (labels.has(row.label)) fail(`duplicate wire-matrix row ${row.label}`)
     labels.add(row.label)
@@ -155,6 +165,11 @@ function main() {
       const calls = summaryCalls(result.stdout ?? "")
       const ok = result.status === 0 && calls.ok
       if (!ok) failed++
+      if (ok && row.label.startsWith("keepalive-")) {
+        for (const line of result.stdout.split("\n")) {
+          if (line.startsWith("PASS ") || line.startsWith('{"shape":')) writeSync(1, `${row.label}: ${line}\n`)
+        }
+      }
       const detail = ok
         ? ""
         : ` exit=${result.status ?? result.signal ?? "none"} liveModelCalls=${calls.calls.length ? calls.calls.join(",") : "missing"} ${failureHint(result.stdout ?? "", result.stderr ?? "")}`

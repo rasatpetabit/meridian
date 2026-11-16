@@ -4619,6 +4619,41 @@ describe("Integration: passthrough early stop", () => {
     })
   }
 
+  // Unkeyed requests stay ineligible for rejection-only retention (SPEC.md):
+  // a fingerprint-keyed checkpoint can collide and skips continuation tool caching.
+  for (const client of ["opencode-unkeyed", "pi-headerless"] as const) {
+    it("bare batch hybrid guard replays " + client, async () => {
+      const headers: Record<string, string> = client === "pi-headerless"
+        ? { "x-meridian-agent": "pi", "user-agent": "pi/1.4.0" }
+        : { "x-opencode-session": "" }
+      const messages = [{ role: "user", content: "read every unkeyed file " + client }]
+      const calls = [0, 1].map(index => ({ type: "tool_use", id: `unkeyed-${client}-${index}`, name: "read",
+        input: { file_path: `/file-${index}` } }))
+      mockMessages = [messageStart("msg_unkeyed_bare"),
+        ...calls.flatMap((call, index) => [toolUseBlockStart(index, call.name, call.id),
+          inputJsonDelta(index, JSON.stringify(call.input)), blockStop(index)]),
+        messageDelta("tool_use"), messageStop(),
+        ...calls.flatMap(call => [{ ...assistantMessage([call]), test_skip_pre_tool_hook: true },
+          unavailableToolMessage(call.id, "read")]),
+        { type: "result", subtype: "error_max_turns", is_error: true },
+      ]
+      mockTerminalError = new Error("Claude Code returned an error result: Reached maximum number of turns (1)")
+      const first = await post(app, { model: "opus[1m]", max_tokens: 400, stream: true, tools: [READ_TOOL], messages },
+        "unused-unkeyed-" + client, headers)
+      expect(await first.text()).toContain('"stop_reason":"tool_use"')
+      mockTerminalError = undefined
+      mockMessages = [assistantMessage([{ type: "text", text: "replayed results" }])]
+      const next = await post(app, { model: "opus[1m]", max_tokens: 400, stream: true, tools: [READ_TOOL],
+        messages: [...messages, { role: "assistant", content: calls },
+          { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
+            content: "REAL_CLIENT_RESULT_" + call.id })) }],
+      }, "unused-unkeyed-" + client, headers)
+      expect(await next.text()).toContain("replayed results")
+      expect(capturedQueryParams.options.resume).toBeUndefined()
+      expect(capturedQueryParams.options.resumeSessionAt).toBeUndefined()
+    })
+  }
+
   for (const shape of ["grouped", "raw-tab", "incomplete-json", "undeclared", "wrong-name", "wrong-id", "deferred", "non-stream"] as const) {
     it("mixed hybrid guard replays " + shape, async () => {
       const key = "mixed-hybrid-control-" + shape

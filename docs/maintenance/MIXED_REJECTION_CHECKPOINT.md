@@ -82,17 +82,44 @@ MERIDIAN_E2E_SCRATCH=<fresh /tmp/meridian-bare.*> bun scripts/e2e-offline-fresh-
 Every GREEN reports exactly two upstream requests and `liveModelCalls:0`.
 The expected policy changes from replay to hybrid; no R1 assertion,
 canonicalization, result-fidelity assertion or replay-control expectation is
-relaxed. The committed matrix row-count guard is now **59**, not removed.
+relaxed. The two new rows took the committed row-count guard from 57 to
+**59** at `51cea9b4`; after the rebase onto `2eb2d7a5` (keepalive and capped
+JSON rows) it is **72**. The guard was not removed.
 
 The first new-test typecheck found a conditional-header union not assignable to
 `Record<string,string>` (exit 2 on candidate and baseline implementation with
 identical tests). Adding that explicit annotation fixes the fixture; typecheck
 then exits 0. This was a test typing error, not a baseline production defect.
 
+### Review follow-up: unkeyed requests
+
+A cross-vendor review of the rebased diff found that the new
+`canonicalRejectedHybridCheckpoint` omitted the session-key condition the
+single-call exception has (`Boolean(profileSessionId)`). An unkeyed wholly-bare
+batch therefore kept a fingerprint-keyed checkpoint, against the rule above that
+unkeyed requests stay ineligible for rejection-only retention, and skipped
+continuation tool caching. The condition is added. Tests
+`bare batch hybrid guard replays opencode-unkeyed` and `... pi-headerless`
+(an OpenCode request with an empty session header, a Pi request without
+`x-session-affinity`) were RED on `07b69288` (the follow-up resumed) and are
+GREEN with the condition (fresh replay).
+
+The first full matrix run on `07b69288` failed six existing mixed `*-follow`
+rows once with a truncated `AssertionError`; they passed in isolation and on the
+rerun. A bounded diagnosis reproduced nothing in 624 runs (0/122 sequential,
+0/120 concurrent, 0/72 full order on `07b69288`; 0/120, 0/120, 0/70 on
+`2eb2d7a5`). Every failed row had printed its `liveModelCalls:0` summary, which
+the harness emits only after its synchronous prefix, fidelity and exact-once
+assertions, and the five surviving failed-row wire captures match passing ones.
+The cause is unknown; the runner keeps only the first error line
+(`scripts/e2e-wire-matrix.mjs:140-143`). Evidence:
+`/mnt/ai-scratch/meridian-bare-name/evidence/flake/report.md`.
+
 ### Qualification boundaries and final-head receipts
 
 Final-head gates are the whole HTTP file, `env -u TMPDIR npm test`, explicit
-typecheck/build/diff check and the complete committed 59-row wire matrix using
+typecheck/build/diff check and the complete committed wire matrix (59 rows at
+`51cea9b4`, 72 after the rebase) using
 CLI 2.1.322. Their logs and exit receipts live in the evidence directory above;
 the final handoff reports concrete counts at the committed head. Filesystem
 bookkeeping uses `env -u TMPDIR`; the matrix uses a fresh

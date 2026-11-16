@@ -8533,8 +8533,9 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 [...streamedToolBlockRecords.values()].every(record =>
                   cliUnavailableToolIds.has(record.id) &&
                   requestTools.some((tool: { name: string }) => tool.name === record.name))
+              // Unkeyed requests stay ineligible, as for the single-call exception.
               const canonicalRejectedHybridCheckpoint =
-                uncapturedRecoveryActive && sawCanonicalResult &&
+                uncapturedRecoveryActive && sawCanonicalResult && Boolean(profileSessionId) &&
                 Boolean(nextPassthroughNativeToolCallId) &&
                 qualifiesNameDispatchHybridBatch(nextPassthroughToolCallIds ?? [])
               const recoverableCheckpoint =

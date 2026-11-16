@@ -5008,7 +5008,10 @@ describe("Integration: passthrough early stop", () => {
         tools: [READ_TOOL], messages: [{ role: "user", content: "read safety files" }] }, `json-capped-safety-${shape}`,
         { "x-meridian-agent": "pi", "user-agent": "pi/1.4.0", "x-session-affinity": sessionKey })
       const body = await response.json()
-      if (["undeclared", "alias", "hidden-response"].includes(shape)) {
+      // hidden-response fails closed: at the single-turn cap the CLI makes one
+      // upstream call, so a second response starting a client tool block means
+      // the proof's assumptions no longer hold and nothing proves that call never ran.
+      if (["undeclared", "alias"].includes(shape)) {
         expect(response.status).toBe(200)
         expect(body.content).toEqual(calls.map(call => ({ ...call, name: call.name === "mcp__oc__read" ? "read" : call.name })))
         expect(body.stop_reason).toBe("tool_use")
@@ -5018,6 +5021,10 @@ describe("Integration: passthrough early stop", () => {
         expect(response.status).toBeGreaterThanOrEqual(400)
         expect(body.type).toBe("error")
         expect(body.content).toBeUndefined()
+        if (shape === "hidden-response") {
+          expect(JSON.stringify(body)).not.toContain("TURN2_PRIVATE")
+          expect(JSON.stringify(body)).not.toContain("hidden-call")
+        }
         if (shape === "mapping-conflict") {
           expect(lookupSharedSession(sessionKey)?.claudeSessionId).toBe("concurrent-winner")
         }

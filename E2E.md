@@ -6882,6 +6882,32 @@ looked roughly doubled. Deferral is E45/E53's subject, not this gate's.
 - The control stays `lineage=new` and packed on every turn, with
   `cached_tokens = 0` and a full-prompt `cache_write_tokens` each turn.
 
+### Concurrent packed first turns
+
+The wire matrix's `unkeyed-chat-parallel` row sends three simultaneous
+headerless Chat Completions requests with different earlier history and the
+same last user message. It requires no fingerprint publications, a separate
+`tool-loop:` key for each second request, and a third request with continuation
+lineage and the complete R1 system, tools and message prefix for each loop.
+Run the full matrix with `MERIDIAN_E2E_SCRATCH` set to the **canonical** path on
+a local filesystem or tmpfs (not a symlink), and `--claude` set to the
+production CLI executable.
+
+For the corresponding live check, build the branch and run:
+
+```bash
+node scripts/e2e-unkeyed-chat.mjs --claude="$production_cli" --credentials="$personal_credentials_file"
+```
+
+Use the same scratch setting and, if production pins the Fable alias, its
+`MERIDIAN_DEFAULT_FABLE_MODEL` setting. The driver copies the Claude Max
+credential file into private scratch, starts the build on a kernel-assigned
+loopback port, and closes the instance and removes its scratch state. It
+sends LiteLLM-shaped `fable[1m]` requests with no session header; only the
+first round is independent. Each third response must read at least 90% of
+its preceding prompt and write at most 10%. Keep only request IDs, lineage
+and usage from the live run; no prompt or tool data is needed as evidence.
+
 The unsettled-checkpoint rescue is model-dependent — it needs the model to emit
 a forwarded tool call under the derived key — so the debug event
 (`passthrough.checkpoint_resume_preferred`; the script turns on debug logging for

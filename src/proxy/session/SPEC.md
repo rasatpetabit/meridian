@@ -72,6 +72,18 @@ Management*, *Lineage Verification*, *SQLite bookkeeping boundary*, *Transcript
 publication lifetime*, *Session store write cost*, *Lineage hash encoding* and
 *Appended content and transient hooks*.
 
+## Packed chat identity
+
+Unkeyed Chat Completions in packed-history mode has no resumable client
+identity. The first translated user text may be only the last client turn;
+separate conversations can share it while carrying different prior history.
+The authenticated translation hop is classified as `independent-request:packed-chat`:
+it neither looks up nor publishes a fingerprint mapping, including when a
+capped SDK turn recovers tool calls. The first tool-loop request has a derived
+key and starts its own lineage; subsequent rounds can resume it. This does not
+relax recovery publication conflicts for resumable requests or change the
+fingerprint fallback for direct Messages clients.
+
 ## Hybrid passthrough checkpoint metadata
 
 `passthroughNativeToolCallId` is optional internal mapping history. With a

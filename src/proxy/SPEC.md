@@ -94,6 +94,10 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   history block (full history every turn would otherwise read as undo or
   divergence); clients with a recognized session key keep real history so
   lineage can resume.
+  - Packed-history mode marks only the authenticated in-process Messages hop
+    as independent (see [session identity](session/SPEC.md#packed-chat-identity)).
+    Explicit and synthesized tool-loop keys, Jcode, and Letta stay on the
+    full-history path. Direct Messages clients cannot opt into this bypass.
   - Content parts map to Claude blocks: `text` and assistant `refusal` to
     text, data-URL `image_url` to image, a base64 PDF data URL in `file` to
     document, through the same `parseDataUrlImage` / `parseDataUrlPdf` the

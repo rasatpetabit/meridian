@@ -146,7 +146,7 @@ installMcpToolsMock(() => ({
 
 const { createProxyServer } = await import("../proxy/server")
 const { clearSessionCache } = await import("../proxy/session/cache")
-const { evictSharedSession, lookupSharedSession, storeSharedSession, setSessionStoreDir } = await import("../proxy/sessionStore")
+const { evictSharedSession, lookupSharedSession, readSessionStoreSnapshot, storeSharedSession, setSessionStoreDir } = await import("../proxy/sessionStore")
 const { diagnosticLog, telemetryStore } = await import("../telemetry")
 
 function userDenyMessage(toolUseId: string) {
@@ -6550,6 +6550,7 @@ describe("Integration: passthrough early stop", () => {
       terminalError: new Error("Claude Code returned an error result: Reached maximum number of turns (1)"),
     }))
 
+    const mappingsBefore = readSessionStoreSnapshot()
     const outputs = await Promise.all(toolIds.map(async (_, index) => {
       const response = await app.fetch(new Request("http://localhost/v1/chat/completions", {
         method: "POST",
@@ -6582,6 +6583,30 @@ describe("Integration: passthrough early stop", () => {
     ))
     expect(returnedIds.map(ids => ids.length)).toEqual([1, 1, 1])
     expect(returnedIds.flat().sort()).toEqual(toolIds)
+    expect(readSessionStoreSnapshot()).toEqual(mappingsBefore)
+  })
+
+  it("does not trust a public Messages request's packed-chat marker", async () => {
+    mockMessages = [assistantMessage([{ type: "text", text: "first answer" }])]
+    const messages = [{ role: "user", content: "A fingerprint-keyed Messages conversation." }]
+    const postMessages = (history: typeof messages) => app.fetch(new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json", "x-api-key": "dummy", "x-meridian-agent": "openai",
+        "x-meridian-packed-chat": "1", "x-meridian-internal-hop": "public-forgery",
+      },
+      body: JSON.stringify({ model: "fable[1m]", max_tokens: 400, stream: false, messages: history }),
+    }))
+    const first = await postMessages(messages)
+    expect(first.status).toBe(200)
+    await first.json()
+    mockMessages = [assistantMessage([{ type: "text", text: "second answer" }])]
+    const second = await postMessages([...messages,
+      { role: "assistant", content: "first answer" }, { role: "user", content: "A follow-up question." },
+    ])
+    expect(second.status).toBe(200)
+    await second.json()
+    expect(capturedQueryParamsAll[1].options.resume).toBe(initialManagedSessionId())
   })
 
   it("non-stream: a session-keyed chat completions tool loop stores the checkpoint and resumes it", async () => {

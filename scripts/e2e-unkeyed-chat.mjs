@@ -18,8 +18,10 @@ const tools = ["read", "lookup", "describe"].map(name => ({ type: "function", fu
 export async function runUnkeyedChat(send, { beforeRound = () => {}, afterTurn = () => {} } = {}) {
   const runId = randomUUID()
   const histories = chatMarkers.map(marker => [
-    { role: "system", content: "This is a tool protocol test, not a coding task. Call the client read tool exactly once for " +
-      "label one, then once for label two. After both results, reply briefly and stop. Never use any native tools." },
+    { role: "system", content: "This is a sequential client tool protocol test, not a coding task. Count receipts in the input. " +
+      "With no receipt, request read for label one only. With a step 1 receipt, request read for label two only. " +
+      "Never request label two before the step 1 receipt arrives. With a step 2 receipt, reply briefly and stop. " +
+      "Make no other calls and never use a native tool." },
     { role: "user", content: "Conversation reference (not a file): " + marker },
     { role: "assistant", content: "Reference noted." },
     { role: "user", content: "Start the two-step read protocol now." },
@@ -56,18 +58,22 @@ export async function runUnkeyedChat(send, { beforeRound = () => {}, afterTurn =
           calls.set(delta.index, call)
         }
       }
-      assert.equal(finish, round < 3 ? "tool_calls" : "stop", id + " finish reason")
-      assert.equal(calls.size, round < 3 ? 1 : 0, id + " tool count")
-      if (round < 3) {
-        const [call] = calls.values()
-        assert(call.id && !seenCalls.has(call.id), id + " must return a unique tool ID")
-        seenCalls.add(call.id)
-        assert.equal(call.function.name, "read", id + " called the client tool")
-        JSON.parse(call.function.arguments)
-        messages.push({ role: "assistant", content, tool_calls: [call] },
-          { role: "tool", tool_call_id: call.id, content: "Synthetic receipt for step " + round + "." })
-      }
       await afterTurn({ id, round, index, usage })
+      assert.equal(finish, round < 3 ? "tool_calls" : "stop", id + " finish reason")
+      if (round < 3) {
+        const toolCalls = [...calls.values()]
+        assert(toolCalls.length > 0, id + " must return tool calls")
+        for (const call of toolCalls) {
+          assert(call.id && !seenCalls.has(call.id), id + " must return a unique tool ID")
+          seenCalls.add(call.id)
+          assert.equal(call.function.name, "read", id + " called the client tool")
+          JSON.parse(call.function.arguments)
+        }
+        messages.push({ role: "assistant", content, tool_calls: toolCalls },
+          ...toolCalls.map(call => ({ role: "tool", tool_call_id: call.id, content: "Synthetic receipt for step " + round + "." })))
+      } else {
+        assert.equal(calls.size, 0, id + " final round must terminate")
+      }
     }))
     const failed = outcomes.find(outcome => outcome.status === "rejected")
     if (failed) throw failed.reason

@@ -13,6 +13,7 @@ const ROW_TIMEOUT_MS = 300_000
 
 /** Harness flags for every real-CLI offline matrix row, in capture order. */
 export const ROWS = [
+  { label: "unkeyed-chat-parallel", args: ["--unkeyed-chat"] },
   // Each keepalive row includes its own no-beat control, through the real CLI.
   { label: "keepalive-text", args: ["--keepalive=text"] },
   { label: "keepalive-single", args: ["--keepalive=single"] },
@@ -110,7 +111,7 @@ function fail(message) {
 function assertRowList() {
   const forbidden = /^(?:--claude|--source-root|--wire)(?:=|$)/
   const labels = new Set()
-  if (ROWS.length !== 72) fail(`wire matrix has ${ROWS.length} rows, expected 72`)
+  if (ROWS.length !== 73) fail(`wire matrix has ${ROWS.length} rows, expected 73`)
   for (const row of ROWS) {
     if (labels.has(row.label)) fail(`duplicate wire-matrix row ${row.label}`)
     labels.add(row.label)
@@ -173,7 +174,7 @@ function main() {
       const calls = summaryCalls(result.stdout ?? "")
       const ok = result.status === 0 && calls.ok
       if (!ok) failed++
-      if (ok && row.label.startsWith("keepalive-")) {
+      if (ok && (row.label.startsWith("keepalive-") || row.label === "unkeyed-chat-parallel")) {
         for (const line of result.stdout.split("\n")) {
           if (line.startsWith("PASS ") || line.startsWith('{"shape":')) writeSync(1, `${row.label}: ${line}\n`)
         }

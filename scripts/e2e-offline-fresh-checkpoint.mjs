@@ -19,6 +19,7 @@
 import assert from "node:assert/strict"
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
+import { chatMarkers, runUnkeyedChat } from "./e2e-unkeyed-chat.mjs"
 
 if (process.argv.some(arg => arg.startsWith("--keepalive="))) {
   const { runKeepalive } = await import("./e2e-offline-keepalive.mjs")
@@ -32,6 +33,7 @@ const cli = resolve(executable)
 const sourceRoot = resolve(process.argv.find(arg => arg.startsWith("--source-root="))?.slice(14)
   ?? new URL("..", import.meta.url).pathname)
 const loadSource = path => import(join(sourceRoot, path))
+const unkeyedChat = process.argv.includes("--unkeyed-chat")
 const callCount = Number(process.argv.find(arg => arg.startsWith("--calls="))?.slice(8) ?? 1)
 assert(Number.isInteger(callCount) && callCount > 0 && callCount <= 3, "--calls must be 1, 2, or 3")
 const thinking = process.argv.includes("--thinking")
@@ -136,6 +138,9 @@ if (unstreamed) {
   }
 }
 const wire = []
+const chatWire = chatMarkers.map(() => [])
+const allFirstTurns = Promise.withResolvers()
+let chatRound = 0
 let followUp = false
 let firstRequestCalls = 0
 const upstream = Bun.serve({
@@ -146,18 +151,34 @@ const upstream = Bun.serve({
     wire.push(body)
     assert.equal(body.stream, true)
     assert(body.tools.some(tool => tool.name === "mcp__oc__read"))
-    const first = wire.length === 1
-    if (!followUp) firstRequestCalls++
-    assert(firstRequestCalls <= (digestExpected ? 2 : 1), "no retry or extra digest is permitted")
-    assert(wire.length <= (followOn ? 4 : digestExpected ? 3 : 2), "no retry is permitted")
-    const blocks = first
+    const wireIndex = wire.length
+    let chatBlocks
+    if (unkeyedChat) {
+      const prompt = JSON.stringify([body.system, body.messages])
+      const index = chatMarkers.findIndex(marker => prompt.includes(marker))
+      assert(index >= 0, "chat prompt must identify its fixture conversation")
+      chatWire[index].push(body)
+      assert.equal(chatWire[index].length, chatRound, "one native request per chat round")
+      if (chatRound === 1) {
+        if (wireIndex === chatMarkers.length) allFirstTurns.resolve()
+        await allFirstTurns.promise
+      }
+      chatBlocks = chatRound < 3 ? [{ type: "tool_use", id: "toolu_chat_" + index + "_" + chatRound,
+        name: "mcp__oc__read", input: { file_path: String(chatRound) } }]
+        : [{ type: "text", text: "complete" }]
+    } else {
+      if (!followUp) firstRequestCalls++
+      assert(firstRequestCalls <= (digestExpected ? 2 : 1), "no retry or extra digest is permitted")
+      assert(wire.length <= (followOn ? 4 : digestExpected ? 3 : 2), "no retry is permitted")
+    }
+    const blocks = chatBlocks ?? (wireIndex === 1
       ? [...(thinking ? [{ type: "thinking", thinking: "offline thought", signature: "offline-signature" }] : []), ...upstreamCalls]
       : [{ type: "text", text: followUp ? "read complete" : "hidden digest" },
         ...(followOn && wire.length === 2 ? secondCalls : followOn && wire.length === 3 ? singleCalls : [])
-          .map(call => ({ ...call, name: "mcp__oc__" + call.name }))]
+          .map(call => ({ ...call, name: "mcp__oc__" + call.name }))])
     const events = [
       ["message_start", { type: "message_start", message: {
-        id: "msg_offline_" + wire.length, type: "message", role: "assistant", model: body.model,
+        id: "msg_offline_" + wireIndex, type: "message", role: "assistant", model: body.model,
         content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 },
       } }],
       ...blocks.flatMap((block, index) => [
@@ -191,7 +212,48 @@ const upstream = Bun.serve({
   },
 })
 let proxy
-try {
+// CLI 2.1.322 serializes the identical environment system message as a
+// singleton text-block array when marked, and a string when unmarked.
+// Canonicalize only that equivalent text representation; never alter text.
+const stripCache = value => Array.isArray(value) ? value.map(stripCache)
+  : value && typeof value === "object" ? Object.fromEntries(Object.entries(value)
+    .filter(([key]) => key !== "cache_control").map(([key, item]) => [key,
+      key === "content" && typeof item === "string" ? [{ type: "text", text: item }] : stripCache(item)])) : value
+
+async function runOfflineChat() {
+  const { createProxyServer } = await loadSource("src/proxy/server.ts")
+  const { readSessionStoreSnapshot } = await loadSource("src/proxy/sessionStore.ts")
+  const { telemetryStore } = await loadSource("src/telemetry/index.ts")
+  proxy = createProxyServer({ silent: true, profiles: [
+    { id: "personal", type: "api", apiKey: "offline-test-key", baseUrl: upstream.url.origin },
+  ], defaultProfile: "personal" })
+  await runUnkeyedChat(request => proxy.app.fetch(request), {
+    beforeRound(round) {
+      chatRound = round
+      if (round === 2) assert.deepEqual(readSessionStoreSnapshot(), {}, "packed turns must not publish a fingerprint")
+      if (round === 3) {
+        const keys = Object.keys(readSessionStoreSnapshot())
+        assert.equal(keys.length, chatMarkers.length, "each first tool-loop round must publish its own key")
+        assert(keys.every(key => key.startsWith("personal:tool-loop:")), "only tool-loop keys can be published")
+      }
+    },
+    afterTurn({ id, round }) {
+      const row = telemetryStore.getRecent({ limit: 20 }).find(metric => metric.requestId === id)
+      assert.equal(row?.lineageType, round === 3 ? "continuation" : "new", id + " lineage")
+    },
+  })
+  for (const [, before, after] of chatWire) {
+    assert.deepEqual(stripCache(after.system), stripCache(before.system), "R1: system prefix changed")
+    assert.deepEqual(stripCache(after.tools), stripCache(before.tools), "R1: tools prefix changed")
+    assert.deepEqual(stripCache(after.messages.slice(0, before.messages.length)),
+      stripCache(before.messages), "R1: upstream message prefix changed")
+  }
+  assert.equal(wire.length, 9)
+  console.log("PASS R1: 3 concurrent unkeyed chats, 3 independent first turns, 3 new tool-loop keys, 3 continuing tool-loop rounds with complete prefixes")
+  console.log(JSON.stringify({ shape: "unkeyed-chat-parallel", upstreamCalls: wire.length, liveModelCalls: 0 }))
+}
+
+async function runCheckpoint() {
   const version = Bun.spawnSync([cli, "--version"], { env: process.env }).stdout.toString().trim()
   const { createProxyServer } = await loadSource("src/proxy/server.ts")
   const { PASSTHROUGH_DENY_REASON } = await loadSource("src/proxy/passthroughDenial.ts")
@@ -341,13 +403,6 @@ try {
   const followUpWire = wire.at(-1)
   const replayShape = batch => resultKind === "image-later" && batch.length > 1
   const expectResume = retainCheckpoint && !transientTail && !missingLater && !replayShape(clientCalls)
-  // CLI 2.1.322 serializes the identical environment system message as a
-  // singleton text-block array when marked, and a string when unmarked.
-  // Canonicalize only that equivalent text representation; never alter text.
-  const stripCache = value => Array.isArray(value) ? value.map(stripCache)
-    : value && typeof value === "object" ? Object.fromEntries(Object.entries(value)
-      .filter(([key]) => key !== "cache_control").map(([key, item]) => [key,
-        key === "content" && typeof item === "string" ? [{ type: "text", text: item }] : stripCache(item)])) : value
   const withoutCache = value => Array.isArray(value) ? value.map(withoutCache)
     : value && typeof value === "object" ? Object.fromEntries(Object.entries(value)
       .filter(([key]) => key !== "cache_control").map(([key, item]) => [key, withoutCache(item)])) : value
@@ -543,6 +598,11 @@ try {
   }
   const sdkVersion = JSON.parse(readFileSync(join(sourceRoot, "node_modules/@anthropic-ai/claude-agent-sdk/package.json"), "utf8")).version
   console.log(JSON.stringify({ cli: version, sdk: sdkVersion, callCount, thinking, transientTail, mixed, deferred, nonStream, unstreamed, captured, capturedLast, bareCall, inputValidation, distinctTools, sseDelayMs, followOn, resultKind, upstreamCalls: wire.length, liveModelCalls: 0 }))
+}
+
+try {
+  if (unkeyedChat) await runOfflineChat()
+  else await runCheckpoint()
 } finally {
   const evidence = process.argv.find(arg => arg.startsWith("--wire="))?.slice(7)
   if (evidence) writeFileSync(evidence, JSON.stringify(wire, null, 2) + "\n")

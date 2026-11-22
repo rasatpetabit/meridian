@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import { hybridToolResultContinuation } from "../proxy/replay"
-import { checkpointPublicationRequiresReplay, createEarlyStopTracker, noteAssistantMessage } from "../proxy/passthroughEarlyStop"
+import { checkpointPublicationRequiresReplay, createEarlyStopTracker, hasNumberedToolCallAlias, noteAssistantMessage } from "../proxy/passthroughEarlyStop"
 
 const calls = ["a", "b", "c"].map(id => ({ type: "tool_use", id, name: "read", input: { path: id } }))
 const echo = [{ role: "assistant", content: calls }]
@@ -42,10 +42,22 @@ describe("hybrid tool-result continuation", () => {
     expect(hybridToolResultContinuation(results, echo, ["a", "b", "c"], "unknown")).toBeUndefined()
   })
 
+  it("distinguishes same-batch numeric aliases from distinct tool IDs", () => {
+    expect(hasNumberedToolCallAlias(new Set(["toolu_x_0001", "toolu_x"]))).toBe(true)
+    expect(hasNumberedToolCallAlias(new Set(["toolu_x_1_51", "toolu_x_1"]))).toBe(true)
+    expect(hasNumberedToolCallAlias(new Set(["toolu_x_1", "toolu_x_2"]))).toBe(false)
+    expect(hasNumberedToolCallAlias(new Set(["toolu_x", "toolu_x_foo", "toolu_x-1", "toolu_x_1_2"]))).toBe(false)
+  })
+
   it("requires explicit hybrid proof as well as capture, completeness and a ready boundary", () => {
     const publication = { clientToolCallIds: ["a", "b"], checkpointToolCallIds: ["a", "b"],
       observedToolCallIds: ["a", "b"], forwardedToolUseIds: new Set(["a", "b"]), checkpointReady: true }
     expect(checkpointPublicationRequiresReplay(publication)).toBe(true)
+    expect(checkpointPublicationRequiresReplay({ ...publication, allowNativeBatch: true })).toBe(false)
+    const aliases = ["a", "a_1"]
+    expect(checkpointPublicationRequiresReplay({ ...publication, allowNativeBatch: true,
+      clientToolCallIds: aliases, checkpointToolCallIds: aliases,
+      observedToolCallIds: aliases, forwardedToolUseIds: new Set(aliases) })).toBe(true)
     expect(checkpointPublicationRequiresReplay({ ...publication, nativeToolCallId: "a" })).toBe(false)
     expect(checkpointPublicationRequiresReplay({ ...publication, nativeToolCallId: "unknown" })).toBe(true)
     expect(checkpointPublicationRequiresReplay({ ...publication, nativeToolCallId: "a", checkpointReady: false })).toBe(true)

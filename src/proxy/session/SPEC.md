@@ -92,9 +92,11 @@ first single-tool fragment, not the last parallel fragment. The complete
 `passthroughToolCallIds` still validates the client's full result set. Both
 JSON and SQLite persist it (SQLite uses `mapping_history`, without a schema
 change), including priority publication and cache reconstruction. A full
-mapping store clears it with the checkpoint; legacy mappings without it
-remain replay-only for multi-call turns. It does not alter client-lineage
-hashes or public headers. The consolidated hybrid assistant has no complete
+mapping store clears it with the checkpoint. Native parallel checkpoints use
+only the existing last assistant UUID and call IDs. Without the hybrid marker,
+a legacy batch whose IDs overlap by a numeric `_<n>` suffix replays instead of
+using the last UUID. The marker does not alter client-lineage hashes or public
+headers. The consolidated hybrid assistant has no complete
 native rollback boundary, so its undo UUID slot is null; undo to that slot
 replays instead of naming a discarded later fragment. Ordinary single-call
 and earlier unchanged undo boundaries are unaffected.

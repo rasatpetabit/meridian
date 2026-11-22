@@ -106,7 +106,7 @@ import { describeLocalBootIdentity } from "./session/processIncarnation"
 import { openCodePrimaryAgentContextHash, requiresOpenCodeAgentReplay } from "./adapters/opencodeAgentContext"
 import { getOpenCodeSourceFeatureOverrides } from "./adapters/opencodeSourceFeatures"
 import { detectServerTools, serverToolErrorMessage } from "./tools"
-import { isSdkToolSearchCall, checkpointPublicationRequiresReplay, clientAbortDisposition, coalesceCompleteToolResultContinuation, createEarlyStopTracker, isClientForwardedToolUse, noteAssistantMessage, noteUserContent, settledToolCallAssistantUuid, settlesCheckpointThenContinues, shouldEarlyStop, trackerCoversStreamedCalls } from "./passthroughEarlyStop"
+import { isSdkToolSearchCall, checkpointPublicationRequiresReplay, clientAbortDisposition, coalesceCompleteToolResultContinuation, createEarlyStopTracker, hasNumberedToolCallAlias, isClientForwardedToolUse, noteAssistantMessage, noteUserContent, settledToolCallAssistantUuid, settlesCheckpointThenContinues, shouldEarlyStop, trackerCoversStreamedCalls } from "./passthroughEarlyStop"
 import { checkEmptyToolInputs, checkUndeliveredToolUses, type EnvelopeViolation } from "./envelopeIntegrity"
 import { classifyTurnOutcome, createRecoveryLifter, hasTruncatableText, shouldAttemptRecovery, shouldInjectSilentTurn, SILENT_TURN_NUDGE } from "./turnOutcome"
 import { resolveAgentAlias } from "./agentMatch"
@@ -4282,7 +4282,8 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
       const hybridNativeId = cachedSession?.passthroughNativeToolCallId
       let hybridResultContent: unknown[] | undefined
       const hybridEcho = allMessages.slice(cachedSession?.messageCount ?? 0)
-      if (passthroughToolCallAssistantUuid && (passthroughToolCallIds?.length ?? 0) > 1 && !hybridNativeId) {
+      if (passthroughToolCallAssistantUuid && !hybridNativeId &&
+        hasNumberedToolCallAlias(new Set(passthroughToolCallIds))) {
         claudeLog("passthrough.checkpoint_replay", {
           expectedToolIds: passthroughToolCallIds?.length,
           reason: "multi_call_results_unproved",
@@ -6456,6 +6457,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
             let nextPassthroughToolCallAssistantUuid: string | undefined
             let nextPassthroughToolCallIds: string[] | undefined
             let nextPassthroughNativeToolCallId: string | undefined
+            let allowNativeToolBatch = false
             let sawCanonicalResult = false
             let assistantRefusal: AssistantRefusal | null = null
             // The CLI sometimes refuses a client call before the PreToolUse
@@ -6635,8 +6637,12 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 earlyStop.firstToolCallAssistantUuid && earlyStop.firstToolCallId &&
                 trackerCoversStreamedCalls(earlyStop, streamedToolUseIds) &&
                 nextPassthroughToolCallIds.every(id => forwardedToolUseIds.has(id))) {
-                nextPassthroughToolCallAssistantUuid = earlyStop.firstToolCallAssistantUuid
-                nextPassthroughNativeToolCallId = earlyStop.firstToolCallId
+                if (hasNumberedToolCallAlias(new Set(nextPassthroughToolCallIds))) {
+                  nextPassthroughToolCallAssistantUuid = earlyStop.firstToolCallAssistantUuid
+                  nextPassthroughNativeToolCallId = earlyStop.firstToolCallId
+                } else {
+                  allowNativeToolBatch = true
+                }
               }
               earlyStopFired = true
               for (let i = capturedToolUses.length - 1; i >= 0; i--) {
@@ -6820,6 +6826,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 nextPassthroughToolCallAssistantUuid = undefined
                 nextPassthroughToolCallIds = undefined
                 nextPassthroughNativeToolCallId = undefined
+                allowNativeToolBatch = false
                 sawCanonicalResult = false
                 const token: StreamAttemptToken = Object.freeze({ mode })
                 activeStreamAttempt = token
@@ -7718,6 +7725,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                     clientToolCallIds,
                     checkpointToolCallIds: nextPassthroughToolCallIds,
                     nativeToolCallId: nextPassthroughNativeToolCallId,
+                    allowNativeBatch: allowNativeToolBatch,
                     observedToolCallIds: [...observedToolUseIds, ...streamedToolUseIds],
                     forwardedToolUseIds,
                     checkpointReady: earlyStopFired && sawCanonicalResult && Boolean(nextPassthroughToolCallAssistantUuid),
@@ -8752,6 +8760,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                   clientToolCallIds: [...streamedToolUseIds, ...capturedToolUses.map(tool => tool.id)],
                   checkpointToolCallIds: nextPassthroughToolCallIds,
                   nativeToolCallId: nextPassthroughNativeToolCallId,
+                  allowNativeBatch: allowNativeToolBatch,
                   observedToolCallIds: [...observedToolUseIds, ...streamedToolUseIds],
                   forwardedToolUseIds: canonicalRejectedCheckpoint
                     ? new Set([...forwardedToolUseIds, ...streamedToolUseIds])

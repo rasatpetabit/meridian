@@ -133,7 +133,7 @@ installSdkMock(() => ({
         // turn's message_delta never arrives, turn 2 begins. This is the
         // exact field behavior from kabo's v1.49.1 transcript.
         timeline.push("CANCELED")
-        yield blockStart(3, "glob", "tg1", sessionId)
+        yield blockStart(3, "glob", "tb1_1", sessionId)
         yield blockDelta(3, '{"patt', sessionId) // cut mid-JSON
         yield denyMsg(["tb1"], sessionId)
         yield msgStart(sessionId) // turn 2
@@ -142,13 +142,13 @@ installSdkMock(() => ({
       }
 
       // Held deny → generation completes normally.
-      yield blockStart(3, "glob", "tg1", sessionId)
+      yield blockStart(3, "glob", "tb1_1", sessionId)
       yield blockDelta(3, '{"pattern":"*.md"}', sessionId)
-      yield assistantMsg([{ type: "tool_use", id: "tg1", name: `${PREFIX}glob`, input: { pattern: "*.md" } }], sessionId)
+      yield assistantMsg([{ type: "tool_use", id: "tb1_1", name: `${PREFIX}glob`, input: { pattern: "*.md" } }], sessionId)
       yield blockStop(3, sessionId)
       timeline.push("glob_streamed")
       const globHook = Promise.resolve(
-        hook({ tool_name: `${PREFIX}glob`, tool_use_id: "tg1", tool_input: { pattern: "*.md" } }, undefined, { signal: new AbortController().signal })
+        hook({ tool_name: `${PREFIX}glob`, tool_use_id: "tb1_1", tool_input: { pattern: "*.md" } }, undefined, { signal: new AbortController().signal })
       ).then(() => timeline.push("glob_deny_resolved"))
 
       yield msgDelta(sessionId)
@@ -158,7 +158,7 @@ installSdkMock(() => ({
       await globHook
       if (denyDelayMs > 0) await sleep(denyDelayMs)
       yield denyMsg(["tb1"], sessionId)
-      yield denyMsg(["tg1"], sessionId)
+      yield denyMsg(["tb1_1"], sessionId)
       timeline.push("post_denies")
       yield assistantMsg([{ type: "text", text: "turn 2 digest garbage" }], sessionId)
       timeline.push("turn2_consumed")
@@ -248,7 +248,7 @@ describe("streaming deny-hold (#552 root cause v2)", () => {
     expect(timeline.indexOf("glob_streamed")).toBeLessThan(timeline.indexOf("bash_deny_resolved"))
     expect(timeline.indexOf("message_delta")).toBeLessThan(timeline.indexOf("bash_deny_resolved"))
     // Client contract: both tool blocks, fully terminated.
-    expect(toolStarts.map((t: any) => t.id).sort()).toEqual(["tb1", "tg1"])
+    expect(toolStarts.map((t: any) => t.id).sort()).toEqual(["tb1", "tb1_1"])
     expect(dangling).toEqual([])
     // The client response ends at turn 1 while the digest drains invisibly to
     // the canonical durability boundary in the background.
@@ -291,11 +291,11 @@ describe("streaming deny-hold (#552 root cause v2)", () => {
       { role: "user", content: "test tools" },
       { role: "assistant", content: [
         { type: "tool_use", id: "tb1", name: "bash", input: { command: "ls /tmp" } },
-        { type: "tool_use", id: "tg1", name: "glob", input: { pattern: "*.md" } },
+        { type: "tool_use", id: "tb1_1", name: "glob", input: { pattern: "*.md" } },
       ]},
       { role: "user", content: [
         { type: "tool_result", tool_use_id: "tb1", content: "ok" },
-        { type: "tool_result", tool_use_id: "tg1", content: "ok" },
+        { type: "tool_result", tool_use_id: "tb1_1", content: "ok" },
       ]},
     ])
     expect(capturedResume as string | undefined).toBe(initialSessionId)
@@ -306,13 +306,13 @@ describe("streaming deny-hold (#552 root cause v2)", () => {
     expect(prompt).toHaveLength(1)
     expect(prompt[0]!.message.content[0]).toEqual({ type: "tool_result", tool_use_id: "tb1", content: "ok" })
     const rendered = JSON.stringify(prompt)
-    expect(rendered).toContain("tg1")
+    expect(rendered).toContain("tb1_1")
     expect(rendered).toContain("Recorded tool result:")
     expect(rendered).not.toContain("denied")
   })
   it("hybrid-resumes every result when the client returns one echo/result pair per call", async () => {
     // A Responses-API client that records each output right after its own call
-    // arrives here as [assistant tb1, user tb1, assistant tg1, user tg1]. It
+    // arrives here as [assistant tb1, user tb1, assistant tb1_1, user tb1_1]. It
     // settles the same batch and uses the same first-fragment hybrid input.
     const app = createProxyServer({ port: 0, host: "127.0.0.1" }).app
     await postStream(app, "hold-4", [{ role: "user", content: "test tools" }])
@@ -326,8 +326,8 @@ describe("streaming deny-hold (#552 root cause v2)", () => {
       { role: "user", content: "test tools" },
       { role: "assistant", content: [{ type: "tool_use", id: "tb1", name: "bash", input: { command: "ls /tmp" } }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "tb1", content: "ok" }] },
-      { role: "assistant", content: [{ type: "tool_use", id: "tg1", name: "glob", input: { pattern: "*.md" } }] },
-      { role: "user", content: [{ type: "tool_result", tool_use_id: "tg1", content: "ok" }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "tb1_1", name: "glob", input: { pattern: "*.md" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "tb1_1", content: "ok" }] },
     ])
     expect(capturedResume as string | undefined).toBe(initialSessionId)
     expect(capturedResumeSessionAt).toBe(assistantToolUuids[0])
@@ -336,7 +336,7 @@ describe("streaming deny-hold (#552 root cause v2)", () => {
     expect(prompt).toHaveLength(1)
     expect(prompt[0]!.message.content[0]).toEqual({ type: "tool_result", tool_use_id: "tb1", content: "ok" })
     const rendered = JSON.stringify(prompt)
-    expect(rendered).toContain("tg1")
+    expect(rendered).toContain("tb1_1")
     expect(rendered).toContain("Recorded tool result:")
     expect(rendered).not.toContain("denied")
   })

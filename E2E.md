@@ -79,12 +79,14 @@ Rejected parallel checkpoint controls (all use the same `--claude=...`):
   rejected call's JSON string. The real CLI must record InputValidationError
   before PreToolUse; the checkpoint evicts and both real results replay.
   `--deferred --calls=1 --input-validation` is the single-call deferred control.
-- **First-fragment hybrid:** `--captured --calls=2` and `--captured --calls=3`
-  retain and resume using the first call's native result plus replay-rendered
-  completed-call records for the rest. The older last-fragment native resume
-  lost later results; it remains unqualified. Non-native images and incomplete
-  results still replay. Add `--sse-delay-ms=25 --distinct-tools` for paced
-  three-distinct-tool coverage.
+- **All-captured parallel:** `--captured --calls=2|3 --id-shape=distinct`
+  requires a native `tool_result` for every call. The default overlapping IDs
+  (or `--id-shape=alias-last`) require first-fragment hybrid results instead.
+  `--follow-on` exercises a second parallel batch and a single-call turn;
+  suffixed IDs without a matching base count as distinct. The matrix checks
+  result order, errors, images, missing results, and deferred PostToolBatch.
+  An image in a non-native hybrid result or an incomplete result set still
+  replays. `--sse-delay-ms=25 --distinct-tools` covers paced distinct tools.
 - `--unstreamed --deferred --captured --calls=1|2|3` exercises SSE completion
   with no SDK partial events. Its disposable launcher execs the named real CLI
   with only `--include-partial-messages` removed. Runtime diagnostics must
@@ -99,13 +101,20 @@ Rejected parallel checkpoint controls (all use the same `--claude=...`):
 Each control inspects the real transcript to distinguish hook capture from
 name-dispatch rejection, assembles the follow-up from the actual client
 response, and checks every call's distinct real result at the upstream. A
-single-call native resume must carry a matching tool_result block; hybrid
+native resume must carry matching `tool_result` blocks for every call; hybrid
 resume carries call 1 natively and later completed-call records via the replay
-renderers. A full replay carries each call ID and result in history text. Neither
-may contain the CLI's
-"No such tool available" result. The mocked early-stop integration file also
+renderers. A full replay carries each call ID and result in history text. No
+path may carry the CLI's "No such tool available" result or an internal-error
+placeholder. The mocked early-stop integration file also
 covers both paths with a full parallel assistant and second-turn success.
 See [baseline/fixed evidence and reachability limits](docs/maintenance/MIXED_REJECTION_CHECKPOINT.md).
+
+Run all offline rows with `bun scripts/e2e-wire-matrix.mjs --claude=<CLI path>`.
+Set `MERIDIAN_E2E_SCRATCH` to a supported local filesystem or tmpfs and
+`MERIDIAN_E2E_WIRE_DIR` to a private directory to retain synthetic upstream
+request bodies. R1 compares system, tools and the prior message prefix, ignoring
+only moving cache annotations and equivalent string/single-text-block encoding.
+Fresh-replay rows make no prefix claim.
 
 ## Pi extension (#1408)
 
@@ -9378,10 +9387,10 @@ MERIDIAN_E2E_SCRATCH=/tmp/meridian-keepalive-scratch TMPDIR=/tmp \
   bun scripts/e2e-wire-matrix.mjs --claude=/home/ras/.local/share/claude/versions/2.1.322
 ```
 
-The nine `keepalive-*` rows each run real HTTP/SDK/native-CLI turns, a due beat
+The `keepalive-*` rows each run real HTTP/SDK/native-CLI turns, a due beat
 (or an eligibility skip), and a follow-on alongside an independent no-beat
-control. They cover text completion, captured single and 2/3-call hybrid
-continuations, a pending-tool checkpoint, mixed bare-name dispatch, thinking,
+control. They cover text completion, captured single and 2/3-call native and
+hybrid continuations, pending checkpoints, mixed bare-name dispatch, thinking,
 five-minute writes and nine pending calls. `--keepalive-prove-red` checks the
 assertions against deliberately corrupted copies of real wire witnesses;
 `--keepalive=parallel3 --keepalive-red=tools` on the checkpoint harness must

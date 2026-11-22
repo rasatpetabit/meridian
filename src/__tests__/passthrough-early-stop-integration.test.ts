@@ -2017,12 +2017,14 @@ describe("Integration: passthrough early stop", () => {
     }, "es-late-parallel")
     expect(second.status).toBe(200)
     expect(capturedQueryParamsAll[1].options.resume).toBe(initialManagedSessionId())
-    expect(capturedQueryParamsAll[1].options.resumeSessionAt).toBe(firstFragment.uuid)
-    const replay = await serializedPrompt(capturedQueryParamsAll[1].prompt)
-    expect(replay).toContain("late-tu-1")
-    expect(replay).toContain("late-tu-2")
-    expect(replay).toContain("A")
-    expect(replay).toContain("B")
+    expect(capturedQueryParamsAll[1].options.resumeSessionAt).toBe(finalFragment.uuid)
+    const inputs: Array<{ message: { content: unknown[] } }> = []
+    for await (const input of capturedQueryParamsAll[1].prompt) inputs.push(input)
+    expect(inputs).toHaveLength(1)
+    expect(inputs[0]?.message.content).toEqual([
+      { type: "tool_result", tool_use_id: "late-tu-1", content: "A" },
+      { type: "tool_result", tool_use_id: "late-tu-2", content: "B" },
+    ])
   })
 
   // The non-stream counterpart of the late-parallel-metadata case above.
@@ -4491,7 +4493,8 @@ describe("Integration: passthrough early stop", () => {
           "x-session-affinity": key + "-" + TEST_RUN_ID } : {}
         const messages = [{ role: "user", content: "read every file" }]
         const calls = Array.from({ length: count }, (_, index) => ({ type: "tool_use",
-          id: `hybrid-${index}`, name: "read", input: { file_path: `/file-${index}` } }))
+          id: bareIndex === -1 ? (index === 0 ? "hybrid-call" : "hybrid-call_" + index) : `hybrid-${index}`,
+          name: "read", input: { file_path: `/file-${index}` } }))
         const isBare = (index: number) => bareIndex === -2 || index === bareIndex
         const toolName = (index: number) => isBare(index) ? "read" : "mcp__oc__read"
         const fragments = calls.map((call, index) => ({ ...assistantMessage([{ ...call, name: toolName(index) }]),
@@ -4524,7 +4527,7 @@ describe("Integration: passthrough early stop", () => {
         const next = await post(app, { model: "opus[1m]", max_tokens: 400, stream: true,
           tools: [READ_TOOL], messages: [...messages, { role: "assistant", content: calls },
             { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
-              content: `REAL_CLIENT_RESULT_${call.id}` })) }],
+              content: `REAL_CLIENT_RESULT[${call.id}]` })) }],
         }, key, headers)
         expect(await next.text()).toContain("all results received")
         expect(capturedQueryParamsAll).toHaveLength(2)
@@ -4534,9 +4537,9 @@ describe("Integration: passthrough early stop", () => {
         for await (const row of capturedQueryParams.prompt) prompt.push(row)
         expect(prompt).toHaveLength(1)
         expect(prompt[0].message.content[0]).toEqual({ type: "tool_result", tool_use_id: calls[0]!.id,
-          content: `REAL_CLIENT_RESULT_${calls[0]!.id}` })
+          content: `REAL_CLIENT_RESULT[${calls[0]!.id}]` })
         const rendered = JSON.stringify(prompt)
-        for (const call of calls) expect(rendered.split(`REAL_CLIENT_RESULT_${call.id}`)).toHaveLength(2)
+        for (const call of calls) expect(rendered.split(`REAL_CLIENT_RESULT[${call.id}]`)).toHaveLength(2)
         expect(rendered).not.toContain("Tool result missing due to internal error")
         expect(rendered).not.toContain("No such tool available")
         expect(rendered).not.toContain("<tool_use_error>")
@@ -4708,7 +4711,7 @@ describe("Integration: passthrough early stop", () => {
         const key = "hybrid-image-" + count + "-" + imageIndex
         const messages = [{ role: "user", content: "read all images" }]
         const calls = Array.from({ length: count }, (_, index) => ({ type: "tool_use",
-          id: "image-call-" + index, name: "read", input: { file_path: "/file-" + index } }))
+          id: index === 0 ? "image-call" : "image-call_" + index, name: "read", input: { file_path: "/file-" + index } }))
         const fragments = calls.map(call => assistantMessage([{ ...call, name: "mcp__oc__read" }]))
         mockMessages = [messageStart("msg_hybrid_image"),
           ...calls.flatMap((call, index) => [toolUseBlockStart(index, "mcp__oc__read", call.id),
@@ -4726,7 +4729,7 @@ describe("Integration: passthrough early stop", () => {
         const image = { type: "image", source: { type: "base64", media_type: "image/png",
           data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==" } }
         const results = calls.map((call, index) => ({ type: "tool_result", tool_use_id: call.id,
-          content: index === imageIndex ? [{ type: "text", text: "REAL_" + call.id }, image] : "REAL_" + call.id }))
+          content: index === imageIndex ? [{ type: "text", text: "REAL_[" + call.id + "]" }, image] : "REAL_[" + call.id + "]" }))
         mockTerminalError = undefined
         mockMessages = [assistantMessage([{ type: "text", text: "images received" }])]
         const next = await post(app, { model: "opus[1m]", max_tokens: 400, stream: true,
@@ -4741,7 +4744,7 @@ describe("Integration: passthrough early stop", () => {
         for await (const row of capturedQueryParams.prompt) prompt.push(row)
         expect(prompt).toHaveLength(1)
         const rendered = JSON.stringify(prompt)
-        for (const call of calls) expect(rendered.split("REAL_" + call.id)).toHaveLength(2)
+        for (const call of calls) expect(rendered.split("REAL_[" + call.id + "]")).toHaveLength(2)
         expect(rendered.split(image.source.data)).toHaveLength(2)
         expect(rendered).not.toContain("Tool result missing due to internal error")
         if (imageIndex === 0) expect(prompt[0]!.message.content[0]).toEqual(results[0])
@@ -4752,14 +4755,14 @@ describe("Integration: passthrough early stop", () => {
   }
 
   for (const count of [2, 3]) {
-    it(`replays a legacy retained ${count}-call checkpoint instead of resuming it`, async () => {
+    it(`replays a legacy retained ${count}-call checkpoint with overlapping IDs instead of resuming it`, async () => {
       const sessionKey = `legacy-captured-${count}-${TEST_RUN_ID}`
       usedSessionKeys.add(sessionKey)
       const headers = { "x-meridian-agent": "pi", "user-agent": "pi/1.4.0", "x-session-affinity": sessionKey }
       const { computeLineageHash, computeMessageHashes } = await import("../proxy/session/lineage")
       const history = [{ role: "user", content: "read all legacy files" }]
       const calls = Array.from({ length: count }, (_, index) => ({
-        type: "tool_use", id: `legacy-${index}`, name: "read", input: { file_path: `/file-${index}` },
+        type: "tool_use", id: index === 0 ? "legacy-call" : "legacy-call_" + index, name: "read", input: { file_path: `/file-${index}` },
       }))
       expect(await storeSharedSession(sessionKey, "legacy-captured-session", history.length,
         computeLineageHash(history), computeMessageHashes(history), undefined, undefined, undefined,
@@ -4769,7 +4772,7 @@ describe("Integration: passthrough early stop", () => {
         model: "opus[1m]", max_tokens: 400, stream: false, tools: [READ_TOOL],
         messages: [...history, { role: "assistant", content: calls },
           { role: "user", content: calls.map(call => ({ type: "tool_result", tool_use_id: call.id,
-            content: `REAL_CLIENT_RESULT_${call.id}` })) }],
+            content: `REAL_CLIENT_RESULT[${call.id}]` })) }],
       }, "unused", headers)
       expect(response.status).toBe(200)
       expect((await response.json()).content).toContainEqual({ type: "text", text: "legacy results read" })
@@ -4778,7 +4781,7 @@ describe("Integration: passthrough early stop", () => {
       const replay = await serializedPrompt(capturedQueryParams.prompt)
       for (const call of calls) {
         expect(replay).toContain(call.id)
-        expect(replay.split(`REAL_CLIENT_RESULT_${call.id}`)).toHaveLength(2)
+        expect(replay.split(`REAL_CLIENT_RESULT[${call.id}]`)).toHaveLength(2)
       }
     })
   }

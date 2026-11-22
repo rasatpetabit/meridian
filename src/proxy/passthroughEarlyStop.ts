@@ -203,13 +203,22 @@ export function checkpointHasUncapturedCalls(
   return false
 }
 
+export function hasNumberedToolCallAlias(ids: ReadonlySet<string>): boolean {
+  for (const id of ids) {
+    const base = /^(.*)_[0-9]+$/.exec(id)?.[1]
+    if (base && ids.has(base)) return true
+  }
+  return false
+}
+
 export function checkpointRequiresReplay(
   toolCallIds: Iterable<string> | undefined,
   forwardedToolUseIds: ReadonlySet<string>,
   nativeToolCallId?: string,
+  allowNativeBatch = false,
 ): boolean {
   const ids = new Set(toolCallIds)
-  return (ids.size > 1 && (!nativeToolCallId || !ids.has(nativeToolCallId))) ||
+  return (ids.size > 1 && (nativeToolCallId ? !ids.has(nativeToolCallId) : !allowNativeBatch || hasNumberedToolCallAlias(ids))) ||
     checkpointHasUncapturedCalls(ids, forwardedToolUseIds)
 }
 
@@ -220,6 +229,7 @@ export function checkpointPublicationRequiresReplay({
   forwardedToolUseIds,
   checkpointReady,
   nativeToolCallId,
+  allowNativeBatch,
 }: {
   clientToolCallIds: Iterable<string>
   checkpointToolCallIds: Iterable<string> | undefined
@@ -227,6 +237,7 @@ export function checkpointPublicationRequiresReplay({
   forwardedToolUseIds: ReadonlySet<string>
   checkpointReady: boolean
   nativeToolCallId?: string
+  allowNativeBatch?: boolean
 }): boolean {
   const visible = new Set(clientToolCallIds)
   const observed = new Set(observedToolCallIds)
@@ -235,7 +246,7 @@ export function checkpointPublicationRequiresReplay({
   return !checkpointReady ||
     visible.size !== checkpoint.size ||
     [...visible].some(id => !checkpoint.has(id)) ||
-    checkpointRequiresReplay(visible, forwardedToolUseIds, nativeToolCallId) ||
+    checkpointRequiresReplay(visible, forwardedToolUseIds, nativeToolCallId, allowNativeBatch) ||
     checkpointHasUncapturedCalls(observed, forwardedToolUseIds)
 }
 

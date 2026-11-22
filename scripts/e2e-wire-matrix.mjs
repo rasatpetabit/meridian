@@ -20,6 +20,9 @@ export const ROWS = [
   { label: "keepalive-parallel2", args: ["--keepalive=parallel2"] },
   { label: "keepalive-parallel3", args: ["--keepalive=parallel3", "--keepalive-prove-red"] },
   { label: "keepalive-checkpoint", args: ["--keepalive=checkpoint"] },
+  { label: "keepalive-native-parallel2", args: ["--keepalive=parallel2", "--keepalive-native"] },
+  { label: "keepalive-native-parallel3", args: ["--keepalive=parallel3", "--keepalive-native"] },
+  { label: "keepalive-native-checkpoint", args: ["--keepalive=checkpoint", "--keepalive-native"] },
   // One pending call: an ask_user_question left waiting while the operator is away.
   { label: "keepalive-checkpoint-single", args: ["--keepalive=checkpoint1"] },
   { label: "keepalive-mixed-bare", args: ["--keepalive=mixed", "--mixed", "--bare-call=2"] },
@@ -92,13 +95,23 @@ export const ROWS = [
   // Mixed controls that must keep fresh replay.
   { label: "mixed-deferred-control", args: ["--mixed", "--calls=2", "--deferred"] },
   { label: "mixed-non-stream-control", args: ["--mixed", "--calls=2", "--captured-last", "--non-stream"] },
+  { label: "bare-2-distinct", args: ["--calls=2", "--id-shape=distinct"] },
+  { label: "distinct-2", args: ["--captured", "--calls=2", "--id-shape=distinct"] },
+  { label: "distinct-3-follow", args: ["--captured", "--calls=3", "--id-shape=distinct", "--thinking", "--follow-on"] },
+  { label: "distinct-error-later", args: ["--captured", "--calls=3", "--id-shape=distinct", "--result-kind=error-later", "--follow-on"] },
+  { label: "distinct-image-later", args: ["--captured", "--calls=3", "--id-shape=distinct", "--result-kind=image-later"] },
+  { label: "distinct-reversed", args: ["--captured", "--calls=3", "--id-shape=distinct", "--result-kind=reversed"] },
+  { label: "distinct-missing", args: ["--captured", "--calls=2", "--id-shape=distinct", "--result-kind=missing-later"] },
+  { label: "distinct-deferred", args: ["--captured", "--calls=3", "--id-shape=distinct", "--deferred"] },
+  { label: "alias-base-last", args: ["--captured", "--calls=3", "--id-shape=alias-last", "--follow-on"] },
 ]
 
 const HELP = `Usage: bun scripts/e2e-wire-matrix.mjs --claude=<CLI path>
 
 Run every committed real-CLI offline wire-matrix row through
 scripts/e2e-offline-fresh-checkpoint.mjs. MERIDIAN_E2E_SCRATCH is required.
-Wire captures go to a fresh directory under it and are removed after a passing run.
+Wire captures go to a fresh directory under MERIDIAN_E2E_WIRE_DIR, if set;
+otherwise use scratch and remove them after a passing run.
 The checkpoint harness sets TMPDIR to its scratch directory, so
 MERIDIAN_E2E_SCRATCH must be ext4, xfs, btrfs, or tmpfs — not virtiofs.
 `
@@ -111,7 +124,7 @@ function fail(message) {
 function assertRowList() {
   const forbidden = /^(?:--claude|--source-root|--wire)(?:=|$)/
   const labels = new Set()
-  if (ROWS.length !== 73) fail(`wire matrix has ${ROWS.length} rows, expected 73`)
+  if (ROWS.length !== 85) fail(`wire matrix has ${ROWS.length} rows, expected 85`)
   for (const row of ROWS) {
     if (labels.has(row.label)) fail(`duplicate wire-matrix row ${row.label}`)
     labels.add(row.label)
@@ -157,8 +170,10 @@ function main() {
   if (!scratch) fail(`MERIDIAN_E2E_SCRATCH is required\n${HELP}`)
   assertRowList()
   const claude = argv[0]
+  const captureDir = process.env.MERIDIAN_E2E_WIRE_DIR
   mkdirSync(scratch, { recursive: true })
-  const wireDir = mkdtempSync(join(scratch, "wire-matrix-"))
+  if (captureDir) mkdirSync(captureDir, { recursive: true, mode: 0o700 })
+  const wireDir = mkdtempSync(join(captureDir ?? scratch, "wire-matrix-"))
   let failed = 0
   let finished = false
   try {
@@ -174,7 +189,7 @@ function main() {
       const calls = summaryCalls(result.stdout ?? "")
       const ok = result.status === 0 && calls.ok
       if (!ok) failed++
-      if (ok && (row.label.startsWith("keepalive-") || row.label === "unkeyed-chat-parallel")) {
+      if (ok && (captureDir || row.label.startsWith("keepalive-") || row.label === "unkeyed-chat-parallel")) {
         for (const line of result.stdout.split("\n")) {
           if (line.startsWith("PASS ") || line.startsWith('{"shape":')) writeSync(1, `${row.label}: ${line}\n`)
         }
@@ -186,7 +201,8 @@ function main() {
     }
     finished = true
   } finally {
-    if (finished && failed === 0) rmSync(wireDir, { recursive: true, force: true })
+    if (finished && failed === 0 && !captureDir) rmSync(wireDir, { recursive: true, force: true })
+    else writeSync(1, "Wire captures: " + wireDir + "\n")
   }
   const passed = ROWS.length - failed
   writeSync(1, `${failed === 0 ? "pass" : "fail"} ${passed}/${ROWS.length}\n`)

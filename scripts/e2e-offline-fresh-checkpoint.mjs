@@ -15,7 +15,9 @@
 // --sse-delay-ms=25 paces individual upstream frames; --distinct-tools with
 // --captured uses a different registered tool for each parallel call.
 // A single name-dispatch rejection at maxTurns=1 retains and resumes. Other
-// uncaptured calls replay unless a name-dispatch streamed batch qualifies for hybrid resume.
+// uncaptured calls replay unless a streamed name-dispatch batch qualifies for hybrid resume.
+// Default captured IDs overlap by a numeric suffix. --id-shape=distinct uses
+// provider-shaped non-overlapping IDs; --id-shape=alias-last puts the base ID last.
 import assert from "node:assert/strict"
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
@@ -70,12 +72,21 @@ assert(!(mixed && captured), "choose --mixed or --captured")
 assert(!unstreamed || captured || mixed, "--unstreamed requires --captured or --mixed")
 const extended = mixed || deferred || nonStream || captured || inputValidation || unstreamed || callCount > 1
 const digestExpected = deferred && !mixed && !captured
+const idShape = process.argv.find(arg => arg.startsWith("--id-shape="))?.slice(11) ?? "alias-first"
+assert(["alias-first", "alias-last", "distinct"].includes(idShape), "unknown --id-shape")
+const aliasId = (base, index) => index === 0 ? base : base + "_" + index
 const calls = Array.from({ length: callCount }, (_, index) => ({
-  type: "tool_use", id: index === 0 ? "toolu_offline" : "toolu_offline_" + index,
+  type: "tool_use", id: idShape === "distinct" ? "toolu_01NNHxdX7JaqGOD9weXYq12" + index
+    : aliasId("toolu_offline", idShape === "alias-last" ? callCount - index - 1 : index),
   name: distinctTools && index > 0 ? "read_" + index : "read",
   input: { file_path: "new-" + (inputValidation ? "\t" : "") + index },
 }))
-const secondCalls = calls.map((call, index) => ({ ...call, id: "toolu_followon_" + index }))
+// Follow-ons cover both native suffixed IDs without a matching base and hybrid aliases.
+const secondCalls = calls.map((call, index) => ({ ...call,
+  id: idShape === "distinct" ? aliasId("toolu_followon", index) : "toolu_followon_" + index }))
+const retainParallel = (captured || (!deferred && !inputValidation)) && callCount > 1 && !nonStream && !unstreamed
+const hybridBatch = batch => batch.length > 1 && (batch === calls
+  ? retainParallel && (!captured || idShape !== "distinct") : batch === secondCalls && idShape === "distinct")
 const singleCalls = [{ ...calls[0], id: "toolu_final_single" }]
 const realResult = call => "REAL_CLIENT_RESULT[" + call.id + "]"
 // Valid 1x1 PNG; small enough that the CLI need not resize/re-encode it.
@@ -294,8 +305,8 @@ async function runCheckpoint() {
   assert(!firstBody.includes("hidden digest"), "hidden second-turn digest must not reach the client")
   assert(firstBody.includes('"stop_reason":"tool_use"'), firstBody)
   assert.equal(firstRequestCalls, digestExpected ? 2 : 1, "deferred flow must complete its hidden second model turn")
-  const hybrid = (captured || (!deferred && !inputValidation)) && callCount > 1 && !nonStream && !unstreamed
-  const retainCheckpoint = hybrid || (captured && callCount === 1) || (!nonStream && !mixed && !deferred && !inputValidation && callCount === 1)
+  const hybrid = hybridBatch(calls)
+  const retainCheckpoint = retainParallel || (captured && callCount === 1) || (!nonStream && !mixed && !deferred && !inputValidation && callCount === 1)
   const mapping = lookupSharedSession("offline:" + session)
   const rejectionText = "<tool_use_error>Error: No such tool available: read</tool_use_error>"
   if (extended) {
@@ -401,18 +412,21 @@ async function runCheckpoint() {
   assert(nextBody.includes("read complete"), nextBody)
   assert.equal(wire.length, digestExpected ? 3 : 2)
   const followUpWire = wire.at(-1)
-  const replayShape = batch => resultKind === "image-later" && batch.length > 1
+  const replayShape = batch => resultKind === "image-later" && hybridBatch(batch)
   const expectResume = retainCheckpoint && !transientTail && !missingLater && !replayShape(clientCalls)
   const withoutCache = value => Array.isArray(value) ? value.map(withoutCache)
     : value && typeof value === "object" ? Object.fromEntries(Object.entries(value)
       .filter(([key]) => key !== "cache_control").map(([key, item]) => [key, withoutCache(item)])) : value
   const assertResultFidelity = (request, batch, supplied) => {
     const blocks = request.messages.flatMap(message => Array.isArray(message.content) ? message.content : [])
-    const native = blocks.filter(block => block.type === "tool_result" && block.tool_use_id === batch[0].id)
-    assert.equal(native.length, 1, "native call-1 result must occur once")
-    assert.deepEqual(withoutCache(native[0]), supplied.find(result => result.tool_use_id === batch[0].id),
-      "native call-1 result must structurally preserve client content and is_error")
-    for (const call of batch.slice(1)) {
+    const hybrid = hybridBatch(batch)
+    for (const call of hybrid ? batch.slice(0, 1) : batch) {
+      const native = blocks.filter(block => block.type === "tool_result" && block.tool_use_id === call.id)
+      assert.equal(native.length, 1, "each native result must occur once: " + call.id)
+      assert.deepEqual(withoutCache(native[0]), supplied.find(result => result.tool_use_id === call.id),
+        "native result must structurally preserve client content and is_error")
+    }
+    for (const call of hybrid ? batch.slice(1) : []) {
       const result = supplied.find(result => result.tool_use_id === call.id)
       assert(result, "fidelity assertion needs a complete result set")
       // Derive the exact completed-call record from the SAME primitives used by
@@ -428,7 +442,7 @@ async function runCheckpoint() {
       assert(!blocks.some(block => block.type === "tool_result" && block.tool_use_id === call.id),
         "later results must be records, not orphan native results")
     }
-    console.log("PASS result fidelity: native call-1 structurally equals client result; later records equal replay renderer (" + resultKind + ")")
+    console.log("PASS result fidelity: " + (hybrid ? "first native result and later records" : "all native results") + " (" + resultKind + ")")
   }
   if (expectResume) {
     assert.deepEqual(stripCache(followUpWire.system), stripCache(wire[0].system), "R1: system prefix changed")
@@ -436,8 +450,8 @@ async function runCheckpoint() {
     assert.deepEqual(stripCache(followUpWire.messages.slice(0, wire[0].messages.length)),
       stripCache(wire[0].messages), "R1: upstream message prefix changed")
     assert(mapping, "R1: qualified streamed checkpoint must retain the existing SDK session")
-    if (hybrid) {
-      assert.equal(mapping.passthroughNativeToolCallId, calls[0].id)
+    if (retainParallel) {
+      assert.equal(mapping.passthroughNativeToolCallId, hybrid ? calls[0].id : undefined)
       assert.deepEqual(mapping.passthroughToolCallIds, calls.map(call => call.id))
     }
     console.log("PASS R1: system, tools and messages retain the complete upstream prefix")
@@ -539,7 +553,7 @@ async function runCheckpoint() {
       const checkpoint = lookupSharedSession("offline:" + session)
       assert(checkpoint, "follow-on checkpoint must remain published")
       assert.deepEqual(checkpoint.passthroughToolCallIds, settledCalls.map(call => call.id))
-      if (settledCalls.length > 1) assert.equal(checkpoint.passthroughNativeToolCallId, settledCalls[0].id)
+      assert.equal(checkpoint.passthroughNativeToolCallId, hybridBatch(settledCalls) ? settledCalls[0].id : undefined)
       const supplied = clientResults(settledCalls)
       const resume = (!missingLater || settledCalls.length === 1) && !replayShape(settledCalls)
       currentHistory = [...currentHistory, { role: "assistant", content: visible },
@@ -597,7 +611,7 @@ async function runCheckpoint() {
     console.log("PASS wire hygiene: no CLI rejection text in any upstream request")
   }
   const sdkVersion = JSON.parse(readFileSync(join(sourceRoot, "node_modules/@anthropic-ai/claude-agent-sdk/package.json"), "utf8")).version
-  console.log(JSON.stringify({ cli: version, sdk: sdkVersion, callCount, thinking, transientTail, mixed, deferred, nonStream, unstreamed, captured, capturedLast, bareCall, inputValidation, distinctTools, sseDelayMs, followOn, resultKind, upstreamCalls: wire.length, liveModelCalls: 0 }))
+  console.log(JSON.stringify({ cli: version, sdk: sdkVersion, callCount, thinking, transientTail, mixed, deferred, nonStream, unstreamed, captured, capturedLast, bareCall, inputValidation, distinctTools, sseDelayMs, followOn, idShape, resultKind, upstreamCalls: wire.length, liveModelCalls: 0 }))
 }
 
 try {

@@ -215,12 +215,18 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   all emitted assistant and streamed call IDs independently of its frozen
   candidate: without boundary events, a later fragment must not hide an
   uncaptured call behind an earlier captured call.
-  **Qualified streamed multi-call batches use first-fragment hybrid
-  continuation** (operator-approved Design A, 2026-11-14). Retain only a
-  canonical settled checkpoint covering every streamed/client-visible call,
-  with positive PreToolUse capture for every observed call and a first
-  assistant fragment containing exactly one tool use.
-  **Name-dispatch batches of two or three calls also qualify**, mixed or
+  **Qualified all-captured streamed parallel batches resume natively unless
+  their IDs overlap.** Retain only a canonical settled checkpoint covering
+  every streamed/client-visible call, with positive PreToolUse capture for
+  every observed call and a first assistant fragment containing exactly one
+  tool use. Keep the last assistant UUID and submit every result natively for
+  non-overlapping IDs. CLI 2.1.322 can substitute internal-error placeholders
+  when one batch ID is another followed by a numeric `_<n>` suffix. Use
+  first-fragment hybrid continuation (operator-approved Design A, 2026-11-14)
+  for that all-captured shape only. Numeric suffixes without a matching base
+  in the batch do not require hybrid continuation.
+  **Name-dispatch batches of two or three calls still qualify for hybrid
+  continuation regardless of ID shape**, mixed or
   wholly refused, at the one-turn cap: every uncaptured call must
   have an id/name-matched CLI name-dispatch refusal (`cliUnavailableToolIds`),
   name a declared client tool, and have a naturally closed, strictly valid
@@ -234,8 +240,9 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   proof separate from actual PreToolUse capture; it applies only with the
   explicit hybrid marker. Either
   the first call or later calls may be bare. Rewind before every CLI rejection;
-  none of its text may appear in any resumed upstream request. Store that first
-  UUID, all pending client IDs and `passthroughNativeToolCallId` identifying the
+  none of its text may appear in any resumed upstream request. For hybrid
+  continuation, store the first UUID, all pending client IDs and
+  `passthroughNativeToolCallId` identifying the
   first call. On the next exact complete-result continuation, send one SDK
   user input: that call's native real result, then completed-call/result
   records for the remaining calls, then any queued user content. Reuse
@@ -257,18 +264,21 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   Only cache markers and the CLI's equivalent string/singleton-text-block
   environment representation are canonicalized for prefix comparison; no
   text, message order, tool definition or system content is ignored.
-  Last-fragment native multi-call resume remains unqualified: four earlier
-  probes lost later real results, and its CLI-internal cause remains unknown.
+  Real-CLI wire checks distinguish the earlier result-loss shape (same-batch
+  numeric aliases) from non-overlapping IDs. Live streamed E41 requires all
+  three distinct receipts natively in the active SDK fork.
   The consolidated hybrid assistant has no complete native undo boundary;
   its rollback UUID slot is null, so editing its results replays instead of
   trying a discarded later-fragment UUID. Ordinary undo remains unchanged.
-  Legacy multi-call checkpoints without the explicit hybrid marker replay.
+  Legacy checkpoints with overlapping IDs but no hybrid marker replay. An
+  existing hybrid marker remains authoritative for the stored first UUID,
+  regardless of ID shape.
   Unqualified mixed/uncaptured batches, JSON completion, assistant-only/unstreamed
   SSE, silent-turn recovery, missing/ambiguous or grouped first-fragment boundaries,
   and incomplete/mismatched results retain their existing replay policy. Both
   canonical turn-cap drain-error recovery and normal streamed completion use
-  the hybrid publication proof; deferred PostToolBatch still qualifies only
-  all-captured batches. CLI 2.1.322 / SDK 0.2.141 offline mixed-wire tests prove
+  the same parallel publication proof; deferred PostToolBatch still qualifies
+  only all-captured batches. CLI 2.1.322 / SDK 0.2.141 offline mixed-wire tests prove
   bare-first/bare-later two-/three-call R1, exact-once real result fidelity and
   follow-on prefix preservation, including thinking. They do not measure live
   model tool-name selection, provider cache billing or production savings.
@@ -284,7 +294,7 @@ Contract*, *Cancellation Contract*; public routes and headers are in
   Publication uses the shared `checkpointPublicationRequiresReplay` invariant:
   a tool turn requires a canonical settled assistant UUID and an exact match
   between its checkpoint IDs and the client-visible batch, with exactly one
-  captured call or the explicit first-fragment hybrid proof above. SSE computes
+  captured call or one of the qualified native or hybrid parallel shapes above. SSE computes
   that batch from both streamed IDs and captured calls queued for the final
   envelope, not only partial stream events. An assistant-only batch can settle at publication after canonical drain; a
   captured single call still retains its rewind checkpoint. Any unqualified

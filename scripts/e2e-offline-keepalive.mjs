@@ -111,7 +111,11 @@ export async function runKeepalive() {
     assert.equal(arg("bare-call"), "2", "mixed fixture uses --bare-call=2")
   }
   const thinking = shape === "thinking"
-  const calls = Array.from({ length: count }, (_, index) => ({ type: "tool_use", id: `toolu_keepalive_${index}`,
+  const native = process.argv.includes("--keepalive-native")
+  const capturedParallel = ["parallel2", "parallel3", "checkpoint"].includes(shape)
+  assert(!native || capturedParallel, "--keepalive-native needs a captured parallel shape")
+  const calls = Array.from({ length: count }, (_, index) => ({ type: "tool_use",
+    id: capturedParallel && !native && index === 0 ? "toolu_keepalive" : `toolu_keepalive_${index}`,
     name: "read", input: { path: `fixture-${index}` } }))
   const result = call => `REAL_CLIENT_RESULT[${call.id}]`
   const tierUsage = beat => ({ input_tokens: 10, output_tokens: 0,
@@ -227,11 +231,17 @@ export async function runKeepalive() {
       assert(current, "real turn must publish its mapping")
       if (count > 1 && !checkpoint) {
         const blocks = before.messages.flatMap(message => Array.isArray(message.content) ? message.content : [])
-        assert.equal(blocks.filter(block => block.type === "tool_result" && block.tool_use_id === calls[0].id).length, 1, "hybrid must have one native first-call result")
-        for (const call of calls.slice(1)) assert(!blocks.some(block => block.type === "tool_result" && block.tool_use_id === call.id), "later hybrid results must be records, not native")
-        console.log(`PASS hybrid witness: ${count} calls; first native result and later completed-call records`)
+        for (const [index, call] of calls.entries()) {
+          const results = blocks.filter(block => block.type === "tool_result" && block.tool_use_id === call.id)
+          assert.equal(results.length, native || index === 0 ? 1 : 0, "native result count: " + call.id)
+          if (results.length) assert.equal(results[0].content, result(call), "real native result: " + call.id)
+        }
+        console.log(`PASS ${native ? "native" : "hybrid"} witness: ${count} calls; ${native ? "all native results" : "first native result and later completed-call records"}`)
       }
-      if (checkpoint) assert.deepEqual(current.passthroughToolCallIds, calls.map(call => call.id), "beat must run while tool results are still pending")
+      if (checkpoint) {
+        assert.deepEqual(current.passthroughToolCallIds, calls.map(call => call.id), "beat must run while tool results are still pending")
+        if (capturedParallel) assert.equal(current.passthroughNativeToolCallId, native ? undefined : calls[0].id)
+      }
       if (thinking && !checkpoint) assert(before.messages.some(message => message.content?.some?.(block => block.type === "thinking" && block.signature === "offline-signature")), "thinking/signature must reach resumed wire")
       const published = JSON.stringify(current)
       const transcripts = () => Object.fromEntries(readdirSync(root, { recursive: true })

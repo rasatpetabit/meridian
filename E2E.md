@@ -114,7 +114,8 @@ Set `MERIDIAN_E2E_SCRATCH` to a supported local filesystem or tmpfs and
 `MERIDIAN_E2E_WIRE_DIR` to a private directory to retain synthetic upstream
 request bodies. R1 compares system, tools and the prior message prefix, ignoring
 only moving cache annotations and equivalent string/single-text-block encoding.
-Fresh-replay rows make no prefix claim.
+Fresh-replay rows make no prefix claim. See the
+[fork port verification record](docs/maintenance/evidence/native-parallel-results-20261122.md).
 
 ## Pi extension (#1408)
 

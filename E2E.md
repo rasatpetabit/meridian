@@ -52,12 +52,15 @@ Rejected parallel checkpoint controls (all use the same `--claude=...`):
   rejected call's JSON string. The real CLI must record InputValidationError
   before PreToolUse; the checkpoint evicts and both real results replay.
   `--deferred --calls=1 --input-validation` is the single-call deferred control.
-- `--captured --calls=2|3` qualifies first-fragment hybrid continuation: the
-  first real result stays native, and later calls/results use completed-work
-  records. Add `--follow-on` for multi → multi → single continuity, `--thinking`
-  for thinking, or `--sse-delay-ms=25 --distinct-tools` for paced tool dispatch.
-  `--result-kind=error-first|error-later|image-first|reversed` checks fidelity;
-  `image-later` and `missing-later` must fail closed to fresh replay.
+- `--captured --calls=2|3` uses a base tool ID and its numeric `_<n>` aliases.
+  First-fragment hybrid continuation keeps the first real result native and
+  renders later calls/results as completed-work records. `--id-shape=distinct`
+  uses non-overlapping provider-style IDs and requires all results to stay
+  native. `--id-shape=alias-last` checks the order-independent overlap guard.
+  Add `--follow-on` to traverse both parallel paths and a single-call turn;
+  `--thinking` or `--sse-delay-ms=25 --distinct-tools` adds stream-shape controls.
+  Result kinds exercise errors, ordering and images. Missing results, or an
+  image in a non-native hybrid result, must fail closed to fresh replay.
 - `--observe-upstream --captured --calls=2|3`, optionally `--follow-on`, checks
   result occurrence counts, placeholders, lineage and the complete prefix
   independently of hybrid metadata. Use `--source-root` to probe unchanged
@@ -82,6 +85,15 @@ carry each call ID and result in history text. Neither may contain the CLI's
 "No such tool available" result. The mocked early-stop integration file also
 covers both paths with a full parallel assistant and second-turn success.
 See [baseline/fixed evidence and reachability limits](docs/maintenance/MIXED_REJECTION_CHECKPOINT.md).
+
+Run all of this upstream port's rows with
+`bun scripts/e2e-wire-matrix.mjs --claude=/absolute/path/to/claude`.
+Set `MERIDIAN_E2E_SCRATCH` to a supported local filesystem or tmpfs; set
+`MERIDIAN_E2E_WIRE_DIR` to a private directory to retain the scripted upstream
+request bodies on success. The R1 assertions compare system, tools, and the
+prior message prefix without moving cache annotations or equivalent text-block
+encoding; R2 requires every delivered tool result exactly once without CLI
+placeholders. Fresh-replay rows make no prefix claim.
 
 ## Pi extension (#1408)
 
